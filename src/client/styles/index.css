@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-pink: #E91E8C;
+    --color-pink-light: #FCE4F3;
+    --color-pink-bg: #FFF0FA;
+    --color-navy: #1A1F36;
+    --color-navy-mid: #2D3561;
+    --color-text-body: #4A5568;
+    --color-text-muted: #9CA3AF;
+    --color-border: #E8ECF0;
+    --color-bg-page: #FFFFFF;
+    --color-bg-surface: #F8F9FB;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: #FFFFFF;
+    color: #1A1F36;
+    font-family: 'Inter', 'Plus Jakarta Sans', 'Noto Sans Devanagari', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+    touch-action: manipulation;
+  }
+}
+
+/* ── Primary Accent: Pink ── */
+.text-pink-brand   { color: #E91E8C; }
+.bg-pink-brand     { background-color: #E91E8C; }
+.border-pink-brand { border-color: #E91E8C; }
+.bg-pink-soft      { background-color: #FFF0FA; }
+.bg-pink-light     { background-color: #FCE4F3; }
+
+/* ── Navy Primary Text ── */
+.text-navy          { color: #1A1F36; }
+.text-navy-mid      { color: #2D3561; }
+.bg-navy            { background-color: #1A1F36; }
+.bg-navy-mid        { background-color: #2D3561; }
+
+/* ── Legacy aliases (keep working) ── */
+.text-navy-900      { color: #1A1F36; }
+.text-navy-800      { color: #2D3561; }
+.bg-navy-950        { background-color: #0D1020; }
+.bg-navy-900        { background-color: #1A1F36; }
+.bg-navy-850        { background-color: #232840; }
+.bg-navy-800        { background-color: #2D3561; }
+.border-navy-900    { border-color: #1A1F36; }
+.border-navy-800    { border-color: #2D3561; }
+.border-navy-700    { border-color: #3D4A80; }
+
+/* ── Legacy hotpink aliases ── */
+.text-hotpink              { color: #E91E8C; }
+.bg-hotpink                { background-color: #E91E8C; }
+.border-hotpink            { border-color: #E91E8C; }
+.hover\:bg-hotpink-hover:hover { background-color: #C4177A; }
+.bg-hotpink-hover          { background-color: #C4177A; }
+
+/* ── Light pink warning shades ── */
+.bg-lightpink-50   { background-color: #FFF5F8; }
+.bg-lightpink-100  { background-color: #FCE4F3; }
+.bg-lightpink-200  { background-color: #F9BFDF; }
+.bg-lightpink-300  { background-color: #F59AC9; }
+.bg-lightpink-500  { background-color: #E91E8C; }
+.border-lightpink-200 { border-color: #F9BFDF; }
+.border-lightpink-300 { border-color: #F59AC9; }
+.text-lightpink-700   { color: #BF1270; }
+.text-lightpink-800   { color: #9F0E5A; }
+.text-lightpink-900   { color: #7A0B45; }
+.text-lightpink-950   { color: #50072D; }
+
+/* ── Surface / Border Tokens ── */
+.bg-surface        { background-color: #F8F9FB; }
+.bg-card           { background-color: #FFFFFF; }
+.border-base       { border-color: #E8ECF0; }
+
+/* ── 48px Touch Targets ── */
+button, input, select, textarea, a {
+  touch-action: manipulation;
+}
+
+/* ── Clean Scrollbar ── */
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: #F8F9FB; }
+::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 4px; }
+
+/* ── Animations ── */
+@keyframes soft-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.82; }
+}
+.animate-soft-pulse { animation: soft-pulse 2.2s infinite ease-in-out; }
+
+@keyframes slide-up {
+  from { transform: translateY(16px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.animate-slide-up { animation: slide-up 0.28s ease-out; }
+
+/* ── Hero Card Gradient ── */
+.hero-gradient {
+  background: linear-gradient(120deg, #1A1F36 60%, #2D3561 100%);
+}

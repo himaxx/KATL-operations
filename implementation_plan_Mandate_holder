@@ -1,0 +1,333 @@
+# Mandate Holder — Home Tab Overhaul: Team & Task Management Hub
+
+## Background
+
+Currently, the Mandate Holder's **Home** tab renders `UserHomeView` — a personal task list that doesn't fit the management role.
+
+Per the user's request, the **Home** tab will be **replaced entirely** with a full-featured **Team & Task Management Hub**, giving the Mandate Holder CRUD over team members and all task types, with distinct visual treatment per task type.
+
+---
+
+## Design Decisions (Confirmed)
+
+| Question | Answer |
+|---|---|
+| Home tab becomes | Full team+task management panel (no personal task list) |
+| Designation bulk-assign | ALL users holding that designation get the task |
+| Delegation 3-deadline auto-replace | Brand-new delegation record created; old one closed |
+| Deadline #2 / #3 setter | **Only Mandate Holder / Owner** can extend deadlines |
+| Compliance = | `is_important=true` checklist item + new `is_compliance=1` flag for sticky UI treatment |
+
+---
+
+## Task Color Palette (per PRD §14.1 — navy + hotpink + whites only)
+
+| Task Type | Color Token | Visual |
+|---|---|---|
+| **Repetitive / Checklist** | `--navy-100` border + `--navy-900` tag | Neutral, standard card |
+| **Flow-based (FMS)** | `--amber-100` border + `--amber-700` tag | Warm amber/gold badge |
+| **Delegation** | `--pink-brand` border + `--pink-brand` tag | Hot pink accent — pinned top |
+| **Compliance** | `--red-100` border + `--red-700` tag | Light-pink/red sticky badge |
+
+> **Note:** "Red" per PRD §14.1 = light pink shade, not a separate red color. Amber is used for FMS to stay within the earth-tone palette.
+
+---
+
+## Open Questions / Warnings
+
+> [!IMPORTANT]
+> The `delegations` table currently has no concept of `deadline_no`, `deadline_date`, or auto-replace logic. A **schema migration is required** (additive columns only — no existing data is destroyed).
+
+> [!WARNING]
+> The existing `delegations` table uses `tat_hours` as the single deadline. The new Delegation Task system adds optional initial deadline (`deadline_at`), deadline attempt counter (`deadline_no`), and auto-replace trigger. Existing delegation rows will have `deadline_no = 0` and be treated as legacy.
+
+> [!NOTE]
+> The Mandate Holder will no longer see their own task list on Home. If the Mandate Holder wants to see their own tasks, they do so via the **Score** or **Systems** tab (as per PRD §13.2 structure). This matches the user's explicit request.
+
+---
+
+## Proposed Changes
+
+### 1. Database — `src/server/db/index.ts`
+
+#### [MODIFY] [`db/index.ts`](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/server/db/index.ts)
+
+Add the following to `initDatabase()` via **`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`** guards (SQLite-safe approach via try/catch per-column):
+
+**`checklist_definitions` table — new column:**
+```sql
+ALTER TABLE checklist_definitions ADD COLUMN is_compliance INTEGER DEFAULT 0;
+```
+
+**`delegations` table — new columns for 3-deadline lifecycle:**
+```sql
+ALTER TABLE delegations ADD COLUMN deadline_at TEXT;          -- ISO timestamp (nullable = no deadline)
+ALTER TABLE delegations ADD COLUMN deadline_no INTEGER DEFAULT 1;  -- 1, 2, or 3
+ALTER TABLE delegations ADD COLUMN auto_replaced INTEGER DEFAULT 0; -- 1 when auto-replaced after 3rd deadline
+ALTER TABLE delegations ADD COLUMN replaced_by TEXT;          -- FK → delegations.id (the new task)
+ALTER TABLE delegations ADD COLUMN is_delegation_task INTEGER DEFAULT 0;  -- 1 = delegation task (pinned), 0 = standard
+```
+
+**New `designation_task_templates` table** — for mandate holder's designation-level task assignment:
+```sql
+CREATE TABLE IF NOT EXISTS designation_task_templates (
+  id TEXT PRIMARY KEY,
+  title_en TEXT NOT NULL,
+  title_hi TEXT NOT NULL,
+  priority TEXT NOT NULL CHECK(priority IN ('LOW', 'MEDIUM', 'HIGH')),
+  task_type TEXT NOT NULL CHECK(task_type IN ('REPETITIVE', 'COMPLIANCE')),
+  frequency TEXT NOT NULL CHECK(frequency IN ('DAILY', 'WEEKLY', 'MONTHLY', 'QUARTERLY', 'YEARLY')),
+  designation_id TEXT NOT NULL,
+  is_important INTEGER DEFAULT 0,
+  is_compliance INTEGER DEFAULT 0,
+  due_time TEXT DEFAULT '19:00',
+  video_url TEXT,
+  created_by TEXT NOT NULL,
+  is_active INTEGER DEFAULT 1,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (designation_id) REFERENCES designations(id),
+  FOREIGN KEY (created_by) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_desig_task_templates ON designation_task_templates(designation_id);
+```
+
+---
+
+### 2. Backend API — `src/server/index.ts`
+
+#### [MODIFY] [`index.ts`](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/server/index.ts)
+
+**New routes to add:**
+
+---
+
+#### Section A — Team Member Management (CRUD)
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/mandate/team` | List all users with designations, last active, status |
+| `POST` | `/api/mandate/team` | Create a new team member (name, mobile, role, initial designation) |
+| `PATCH` | `/api/mandate/team/:userId` | Edit team member (name, is_active toggle, role) |
+| `GET` | `/api/mandate/team/:userId/tasks` | See all tasks assigned to a specific member |
+| `POST` | `/api/mandate/team/:userId/designations` | Assign a designation to a user |
+| `DELETE` | `/api/mandate/team/:userId/designations/:desigId` | Remove a designation from a user |
+
+Guard: `req.user.role === 'OWNER' || 'MANDATE_HOLDER'` on all routes.
+
+---
+
+#### Section B — Designation-Based Bulk Task Assignment
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/mandate/designation-tasks` | List all designation task templates |
+| `POST` | `/api/mandate/designation-tasks` | Create template + auto-expand to all users in that designation |
+| `PATCH` | `/api/mandate/designation-tasks/:id` | Edit template (title, frequency, priority) |
+| `DELETE` | `/api/mandate/designation-tasks/:id` | Deactivate template + stop future occurrences |
+
+**`POST /api/mandate/designation-tasks` logic:**
+1. Validate body: `{ title_en, title_hi, priority, task_type, frequency, designation_id, is_important, is_compliance, due_time }`
+2. Insert row into `designation_task_templates`
+3. Fetch all users with `designation_id` via `user_designations`
+4. For each user → call `WorkItemService.createWorkItem()` + insert `checklist_definitions` row with `target_type='USER'` and `target_id = user.id`
+5. Return `{ success: true, assigned_to_count: N }`
+
+---
+
+#### Section C — Delegation Tasks (3-Deadline System)
+
+| Method | Route | Purpose |
+|---|---|---|
+| `POST` | `/api/mandate/delegation-tasks` | Create a delegation task (with or without deadline) |
+| `GET` | `/api/mandate/delegation-tasks` | List all delegation tasks created by this mandate holder |
+| `PATCH` | `/api/mandate/delegation-tasks/:id/extend-deadline` | Assign deadline #2 or #3 (mandate holder only) |
+| `POST` | `/api/mandate/delegation-tasks/:id/mark-done` | Mark done from mandate holder side |
+
+**`POST /api/mandate/delegation-tasks` body:**
+```json
+{
+  "assignee_user_id": "uuid",
+  "title_en": "...",
+  "title_hi": "...",
+  "deadline_at": "2026-08-20T18:00:00.000Z",  // null = member sets their own
+  "is_important": false
+}
+```
+
+**Logic for the 3-deadline lifecycle (nightly cron job + manual trigger):**
+- On `PATCH /extend-deadline`: check `deadline_no < 3` → update `deadline_at`, increment `deadline_no`, update `planned_at` in `work_items`.
+- If `deadline_no = 3` and deadline passes: a nightly cron `checkExpiredDelegationTasks()` runs:
+  1. Finds delegation rows where `is_delegation_task=1`, `status='OPEN'`, `deadline_at < NOW()`, `deadline_no=3`
+  2. Marks old row `status='MISSED'`, `auto_replaced=1`
+  3. Creates a brand-new delegation row (same title, same assignee, `deadline_no=1`, no `deadline_at`) via `WorkItemService.createWorkItem()`
+  4. Links `old.replaced_by = new.id`
+
+**Member's perspective — member sets their own deadline (when `deadline_at` is null):**
+Add `PATCH /api/delegations/:id/set-deadline` — only the assignee user can call this, only if `deadline_no=1` and `deadline_at IS NULL`.
+
+---
+
+#### Section D — Compliance Task Creation
+
+Compliance tasks use the existing checklist system. Add `is_compliance` field to:
+- `POST /api/checklists/definitions` — accept and store `is_compliance` (0 or 1)
+- `GET /api/work-items` (user home endpoint) — add `is_compliance` field to the response so the frontend can apply sticky/color treatment
+
+No new table needed.
+
+---
+
+### 3. Frontend — New `MandateHomeView.tsx`
+
+#### [NEW] [`src/client/views/mandate/MandateHomeView.tsx`](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/client/views/mandate/MandateHomeView.tsx)
+
+This replaces `UserHomeView` for the `MANDATE_HOLDER` role on the Home tab.
+
+**Top-level structure — 4 internal tabs:**
+
+```
+┌─────────────────────────────────────────┐
+│  🏠 Team & Task Hub            [Header] │
+├─────────────────────────────────────────┤
+│  [Team] [Assign] [Delegation] [Compliance] │
+│  (internal sub-tabs via pill selector)  │
+└─────────────────────────────────────────┘
+```
+
+---
+
+#### Sub-tab 1: **Team Members** (CRUD)
+
+- **List view:** Card per member (avatar, name, designation badges, active/inactive toggle)
+- **Add member:** Inline form slide-down (name, mobile, role selector)
+- **Edit member:** Tap card → expand → edit fields, reassign designations
+- **Task list per member:** Tap a member → see all their open tasks grouped by type (Repetitive, FMS, Delegation, Compliance)
+- **Designation assignment:** Multi-select from existing designations; shows confirmation dialog per PRD §3.2
+
+---
+
+#### Sub-tab 2: **Assign by Designation** (Bulk Task Assignment)
+
+- **Form:** `title_en`, `title_hi`, `designation` (dropdown from designations list), `priority` (Low/Medium/High), `task_type` (Repetitive / Compliance), `frequency`, `due_time`, `is_important`
+- **Preview:** Before submit, show "This will assign to X members: [name avatars]"
+- **Template list:** Existing templates shown below form; edit / deactivate inline
+
+---
+
+#### Sub-tab 3: **Delegation Tasks**
+
+**Create form:**
+- `assignee_user_id` (person picker with selfie photo)
+- `title_en`, `title_hi`
+- `deadline_at` — optional date-time picker. If left blank → shows "(Member will set deadline)"
+- `is_important` toggle
+
+**Active delegation task list:**
+
+Each card shows:
+- 🔴 Hot pink left border
+- Task title
+- Assigned to: [photo] Name
+- Deadline badge: `Deadline #1: Aug 20` or `No deadline yet (member to set)`
+- Status badge: `On Track` / `Overdue — Extend Deadline` / `Done ✓`
+- **Extend Deadline button** (visible if overdue and `deadline_no < 3`)
+- **Mark Done button**
+
+**Deadline extension panel:**
+On tap → date picker for new deadline → "Set Deadline #2/3" button → confirmation.
+
+---
+
+#### Sub-tab 4: **Compliance Tasks**
+
+- Form to create a compliance task: same as checklist creation but with `is_compliance=true` pre-set, `is_important=true` forced
+- List of existing compliance definitions
+- Edit / deactivate compliance tasks
+
+---
+
+### 4. Frontend — Task Card UI Enhancements
+
+#### [MODIFY] [`src/client/views/user/UserHomeView.tsx`](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/client/views/user/UserHomeView.tsx)
+
+Enhance the task card rendering to apply visual treatment for task types:
+
+**Sorting order on user's home:**
+1. 📌 **Compliance tasks** — pinned top, light-red/pink left border, sticky label
+2. 📌 **Delegation tasks** — pinned directly below compliance, hot-pink border, pinned label
+3. 🌊 **FMS (flow-based) tasks** — amber border, amber badge
+4. ✅ **Repetitive/checklist tasks** — standard navy card
+
+**CSS classes to add:**
+```css
+.task-card--compliance  { border-left: 3px solid var(--red-300); background: var(--red-50); }
+.task-card--delegation  { border-left: 3px solid var(--pink-brand); background: var(--pink-50); }
+.task-card--fms         { border-left: 3px solid var(--amber-400); background: var(--amber-50); }
+.task-card--repetitive  { border-left: 3px solid var(--navy-200); }
+```
+
+**Type badge chips:**
+- `COMPLIANCE` → `🔒 Compliance` (red chip, sticky notice: "Must complete before deadline")
+- `DELEGATION` → `📌 Delegated` (pink chip)
+- `FMS` → `🌊 Flow Task` (amber chip)
+- `REPETITIVE` → *(no extra chip; standard card)*
+
+---
+
+### 5. App.tsx routing change
+
+#### [MODIFY] [`src/client/App.tsx`](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/client/App.tsx)
+
+```diff
+- import { UserHomeView } from './views/user/UserHomeView';
++ import { MandateHomeView } from './views/mandate/MandateHomeView';
+
+  if (user.role === 'MANDATE_HOLDER') {
+    switch (activeTab) {
+      case 'home':
+-       return <UserHomeView />;
++       return <MandateHomeView />;
+```
+
+---
+
+### 6. User Home endpoint enhancement
+
+#### [MODIFY] `GET /api/work-items` (inside `src/server/index.ts`)
+
+Add `source_module` and join to `checklist_definitions.is_compliance` and `delegations.is_delegation_task` so the frontend can determine card type.
+
+Return shape per item:
+```json
+{
+  "id": "...",
+  "title_en": "...",
+  "task_type": "REPETITIVE | FMS | DELEGATION | COMPLIANCE",
+  "is_pinned": true,
+  "deadline_no": 2,
+  "is_compliance": true,
+  "planned_at": "..."
+}
+```
+
+---
+
+## Verification Plan
+
+### Manual Verification (in browser at `localhost:5173/`)
+
+1. **Login as Mandate Holder** → confirm Home tab shows Management Hub (not task list)
+2. **Team tab:** Create a new member → assign designation → toggle active/inactive → view their task list
+3. **Assign by Designation tab:** Create a repetitive task for a designation with 3 members → confirm all 3 get it on their home screens
+4. **Delegation tab:** 
+   - Create delegation with no deadline → login as assigned user → confirm they can set deadline
+   - Create delegation with deadline → let it expire → mandate holder extends to #2 → extend to #3 → simulate 3rd expiry → confirm auto-new-task created
+5. **Compliance tab:** Create compliance task → login as user → confirm it appears sticky at top with red border
+6. **FMS task:** Advance an FMS flow → login as next step user → confirm amber card appears
+7. **Task sort order:** Confirm: Compliance → Delegation → FMS → Repetitive on user's home
+
+### Automated (existing server)
+```bash
+npm run dev
+# Check server starts with no schema errors after DB migration
+```

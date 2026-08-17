@@ -1,0 +1,16 @@
+{
+  "short_name": "KATL Ops",
+  "name": "Ketan Aditya Operations",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0B192C",
+  "theme_color": "#0B192C",
+  "display": "standalone",
+  "orientation": "portrait"
+}
