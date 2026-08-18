@@ -1,11 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
-import { Layers, Shield, Clock, PlusCircle, ArrowRight, Play, CheckCircle2, Video, Send } from 'lucide-react';
+import { Shield, Clock, ArrowRight, Video, Send, AlertCircle } from 'lucide-react';
 import { DelayDashboardView } from '../capabilities/DelayDashboardView';
 import { AuditSamplerView } from '../capabilities/AuditSamplerView';
 import { DelegationView } from '../capabilities/DelegationView';
 import { VideoBacklogView } from '../capabilities/VideoBacklogView';
+import { PurchaseFmsView } from './PurchaseFmsView';
+import { O2DFmsView } from './O2DFmsView';
+
+// Maps system_code (from user_systems table) → FMS definition codes shown to user
+const SYSTEM_TO_FMS_CODES: Record<string, string[]> = {
+  O2D: ['O2D'],
+  Purchase: ['PUR'],
+  // CL (Checklist) is managed under the Tasks/Home tab, not the FMS Flowchart section
+};
 
 export const UserSystemsView: React.FC = () => {
   const { user } = useAuth();
@@ -13,6 +22,7 @@ export const UserSystemsView: React.FC = () => {
   const [flows, setFlows] = useState<any[]>([]);
   const [definitions, setDefinitions] = useState<any[]>([]);
   const [activeCapability, setActiveCapability] = useState<string | null>(null);
+  const [activeFmsCode, setActiveFmsCode] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -78,16 +88,36 @@ export const UserSystemsView: React.FC = () => {
     );
   }
 
+  if (activeFmsCode === 'PUR') {
+    return <PurchaseFmsView onBack={() => setActiveFmsCode(null)} />;
+  }
+
+  if (activeFmsCode === 'O2D') {
+    return <O2DFmsView onBack={() => setActiveFmsCode(null)} />;
+  }
+
   const userCapabilities = user.capabilities || [];
+  const userSystems = user.systems || [];
+
+  // Compute allowed FMS codes based on assigned systems
+  const allowedFmsCodes = new Set<string>();
+  for (const sysCode of userSystems) {
+    const fmsCodes = SYSTEM_TO_FMS_CODES[sysCode] || [];
+    fmsCodes.forEach((c) => allowedFmsCodes.add(c));
+  }
+
+  // Filter FMS definitions to only what the user has access to
+  const filteredDefinitions = definitions.filter((def) => allowedFmsCodes.has(def.code));
+  const hasNoFmsAccess = filteredDefinitions.length === 0;
 
   return (
     <div className="space-y-5 pb-20 max-w-md mx-auto px-4 pt-4">
       <div>
         <h2 className="text-xl font-extrabold text-navy-900">{t.navSystems}</h2>
-        <p className="text-xs font-medium text-slate-500">Flowchart modules & role capability dashboards</p>
+        <p className="text-xs font-medium text-slate-500">Flowchart modules &amp; role capability dashboards</p>
       </div>
 
-      {/* Role Capabilities (Section 3.3 & Section 12) */}
+      {/* Role Capabilities — driven by designation, unchanged */}
       {userCapabilities.length > 0 && (
         <div className="space-y-2.5">
           <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-400">
@@ -124,7 +154,7 @@ export const UserSystemsView: React.FC = () => {
                   </div>
                   <div>
                     <h4 className="font-extrabold text-sm">{t.randomAudit}</h4>
-                    <p className="text-[11px] text-slate-300">Daily 10-sample verification & false flag reversal</p>
+                    <p className="text-[11px] text-slate-300">Daily 10-sample verification &amp; false flag reversal</p>
                   </div>
                 </div>
                 <ArrowRight className="w-5 h-5 text-hotpink" />
@@ -170,42 +200,65 @@ export const UserSystemsView: React.FC = () => {
         </div>
       )}
 
-      {/* FMS Modules */}
+      {/* FMS Modules — filtered by user's assigned systems */}
       <div className="space-y-3">
         <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-400">
           Flowchart Modules
         </h3>
 
-        <div className="space-y-2.5">
-          {definitions.map((def) => {
-            const flowName = (language === 'hi' || language === 'hi_ro') && def.name.hi ? def.name.hi : def.name.en;
-            const flowDesc = (language === 'hi' || language === 'hi_ro') && def.description.hi ? def.description.hi : def.description.en;
-            const activeCount = flows.filter((f) => f.fms_code === def.code && f.status === 'ACTIVE').length;
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <div className="w-5 h-5 rounded-full border-2 border-hotpink border-t-transparent animate-spin" />
+          </div>
+        ) : hasNoFmsAccess ? (
+          <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col items-center gap-3 text-center">
+            <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center">
+              <AlertCircle className="w-6 h-6 text-slate-400" />
+            </div>
+            <div>
+              <h4 className="font-extrabold text-sm text-navy-900">Not part of any system</h4>
+              <p className="text-xs text-slate-500 mt-1 leading-relaxed max-w-[200px]">
+                Contact your manager to get access to a flowchart system.
+              </p>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {filteredDefinitions.map((def) => {
+              const flowName = (language === 'hi' || language === 'hi_ro') && def.name.hi ? def.name.hi : def.name.en;
+              const flowDesc = (language === 'hi' || language === 'hi_ro') && def.description.hi ? def.description.hi : def.description.en;
+              const activeCount = flows.filter((f) => f.fms_code === def.code && f.status === 'ACTIVE').length;
 
-            return (
-              <div
-                key={def.code}
-                className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-2 hover:border-slate-300 transition"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-black uppercase px-2.5 py-0.5 rounded-md bg-navy-900 text-white">
-                    {def.code}
-                  </span>
-                  <span className="text-xs font-extrabold px-2.5 py-0.5 rounded-full bg-slate-100 text-navy-900 border border-slate-200">
-                    {activeCount} Active {activeCount === 1 ? 'Flow' : 'Flows'}
-                  </span>
+              return (
+                <div
+                  key={def.code}
+                  onClick={() => setActiveFmsCode(def.code)}
+                  className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-2 hover:border-slate-300 transition cursor-pointer active:scale-[0.99] group"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black uppercase px-2.5 py-0.5 rounded-md bg-navy-900 text-white">
+                      {def.code}
+                    </span>
+                    <span className="text-xs font-extrabold px-2.5 py-0.5 rounded-full bg-slate-100 text-navy-900 border border-slate-200">
+                      {activeCount} Active {activeCount === 1 ? 'Flow' : 'Flows'}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-bold text-base text-navy-900 leading-tight group-hover:text-pink-brand transition">{flowName}</h4>
+                    <ArrowRight className="w-4 h-4 text-slate-300 group-hover:text-pink-brand group-hover:translate-x-0.5 transition shrink-0" />
+                  </div>
+                  <p className="text-xs text-slate-500 line-clamp-2">{flowDesc}</p>
+
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+                    <span>{def.steps.length} Steps in sequence</span>
+                    <span className="text-pink-brand font-bold">Open Flowchart →</span>
+                  </div>
                 </div>
-
-                <h4 className="font-bold text-base text-navy-900 leading-tight">{flowName}</h4>
-                <p className="text-xs text-slate-500 line-clamp-2">{flowDesc}</p>
-
-                <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
-                  <span>{def.steps.length} Steps in sequence</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -102,6 +102,10 @@ server.post('/api/auth/login-staff', async (req: any, reply) => {
     WHERE ud.user_id = ?
   `).all(user.id).map((c: any) => c.capability);
 
+  const systems = db.prepare(
+    'SELECT system_code FROM user_systems WHERE user_id = ? ORDER BY system_code'
+  ).all(user.id).map((s: any) => s.system_code);
+
   const payload = {
     id: user.id,
     name: user.name,
@@ -109,6 +113,7 @@ server.post('/api/auth/login-staff', async (req: any, reply) => {
     role: user.role,
     designations: designations.map((d) => d.name),
     capabilities,
+    systems,
     requiresNewPin: !!user.temp_pin,
   };
 
@@ -149,6 +154,10 @@ server.post('/api/auth/login-admin', async (req: any, reply) => {
 
   const capabilities = ['DELAY_DASHBOARD', 'AUDIT', 'DELEGATION_SHEET', 'VIDEO_BACKLOG', 'IMPORTANT_MISS_ALERT'];
 
+  const systems = db.prepare(
+    'SELECT system_code FROM user_systems WHERE user_id = ? ORDER BY system_code'
+  ).all(user.id).map((s: any) => s.system_code);
+
   const payload = {
     id: user.id,
     name: user.name,
@@ -156,6 +165,7 @@ server.post('/api/auth/login-admin', async (req: any, reply) => {
     role: user.role,
     designations: designations.map((d) => d.name),
     capabilities,
+    systems,
   };
 
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
@@ -193,6 +203,10 @@ server.get('/api/auth/me', { preHandler: [authenticate] }, async (req: any) => {
     WHERE ud.user_id = ?
   `).all(user.id).map((c: any) => c.capability);
 
+  const systems = db.prepare(
+    'SELECT system_code FROM user_systems WHERE user_id = ? ORDER BY system_code'
+  ).all(user.id).map((s: any) => s.system_code);
+
   return {
     user: {
       ...user,
@@ -200,6 +214,9 @@ server.get('/api/auth/me', { preHandler: [authenticate] }, async (req: any) => {
       capabilities: user.role === 'OWNER' || user.role === 'MANDATE_HOLDER' 
         ? ['DELAY_DASHBOARD', 'AUDIT', 'DELEGATION_SHEET', 'VIDEO_BACKLOG', 'IMPORTANT_MISS_ALERT']
         : capabilities,
+      systems: user.role === 'OWNER' || user.role === 'MANDATE_HOLDER'
+        ? ['CL', 'O2D', 'Purchase']
+        : systems,
     },
   };
 });
@@ -242,14 +259,35 @@ server.post('/api/auth/set-pin', { preHandler: [authenticate] }, async (req: any
 // 2. WORK ITEMS & TASKS
 // ----------------------------------------------------
 server.get('/api/work-items/my', { preHandler: [authenticate] }, async (req: any) => {
-  // Return all tasks for today (both OPEN and DONE) plus any open tasks so completed tasks stay visible for the day!
+  // ── Home tab query logic:
+  // • DELEGATION tasks (source_module='delegation'): always show if OPEN (pinned until done)
+  // • COMPLIANCE tasks (task_type='COMPLIANCE'): always show if OPEN (pinned until done)
+  // • Regular checklist / FMS tasks: only show today's (planned today OR completed today)
   const items = db.prepare(`
-    SELECT * FROM work_items 
-    WHERE assignee_user_id = ? 
-      AND (status = 'OPEN' OR DATE(completed_at) = DATE('now') OR DATE(planned_at) = DATE('now'))
-    ORDER BY 
+    SELECT * FROM work_items
+    WHERE assignee_user_id = ?
+      AND (
+        -- Pinned: Delegation tasks always visible until done
+        (source_module = 'delegation' AND status != 'DONE')
+        -- Pinned: Compliance tasks always visible until done
+        OR (task_type = 'COMPLIANCE' AND status != 'DONE')
+        -- Open FMS tasks are ALWAYS visible until done
+        OR (source_module = 'fms' AND status != 'DONE')
+        -- Today's regular tasks (open or completed today)
+        OR (DATE(planned_at, 'localtime') = DATE('now', 'localtime') AND source_module != 'delegation' AND task_type != 'COMPLIANCE')
+        -- Any task completed today (to keep visible in list after submit)
+        OR DATE(completed_at, 'localtime') = DATE('now', 'localtime')
+      )
+    ORDER BY
+      -- Pinned group (DELEGATION + COMPLIANCE) comes first
+      CASE
+        WHEN source_module = 'delegation' AND status != 'DONE' THEN 0
+        WHEN task_type = 'COMPLIANCE' AND status != 'DONE' THEN 0
+        ELSE 1
+      END ASC,
+      -- Within each group: done items sink to bottom
       CASE WHEN status = 'DONE' THEN 1 ELSE 0 END ASC,
-      is_important DESC, 
+      is_important DESC,
       planned_at ASC
   `).all(req.user.id) as any[];
 
@@ -258,9 +296,10 @@ server.get('/api/work-items/my', { preHandler: [authenticate] }, async (req: any
     const plannedAt = new Date(item.planned_at);
     const nowIST = getISTComponents(now);
     const plannedIST = getISTComponents(plannedAt);
-    
+
     const isPastDate = nowIST.dateStr > plannedIST.dateStr;
     const isPast8PM = nowIST.dateStr === plannedIST.dateStr && (nowIST.hours >= 20);
+    // Only regular (non-compliance, non-delegation) daily checklist tasks get locked
     const isDailyChecklist = item.source_module === 'checklist' && item.task_type !== 'COMPLIANCE';
     const isLocked = item.status !== 'DONE' && isDailyChecklist && (isPastDate || isPast8PM);
 
@@ -296,6 +335,47 @@ server.post('/api/work-items/:id/complete', { preHandler: [authenticate] }, asyn
   }
 });
 
+// Late-submit: allows a user to submit a past-due / locked task from the Score tab's "Not Done" section.
+// Bypasses the 8 PM checklist lock. completed_at = NOW() so the scoring engine marks it "late"
+// (completed_at > planned_at → not on time, but WD improves since it IS done).
+server.post('/api/work-items/:id/late-submit', { preHandler: [authenticate] }, async (req: any, reply) => {
+  const workItemId = req.params.id;
+
+  // Verify the task exists and belongs to this user
+  const item = db.prepare('SELECT * FROM work_items WHERE id = ?').get(workItemId) as any;
+  if (!item) return reply.status(404).send({ error: 'Task not found' });
+  if (
+    item.assignee_user_id !== req.user.id &&
+    req.user.role !== 'OWNER' &&
+    req.user.role !== 'MANDATE_HOLDER'
+  ) {
+    return reply.status(403).send({ error: 'Permission denied — not your task' });
+  }
+  if (item.status === 'DONE') {
+    return reply.status(400).send({ error: 'Task is already marked as done' });
+  }
+  if (item.status === 'FLAGGED_FALSE') {
+    return reply.status(400).send({ error: 'Flagged-false tasks cannot be self-submitted' });
+  }
+
+  try {
+    // Use WorkItemService with is_admin_override=true to bypass the 8 PM lock.
+    // completed_at defaults to new Date() inside completeWorkItem.
+    // The score engine will compare completed_at > planned_at and mark it Late.
+    WorkItemService.completeWorkItem({
+      work_item_id: workItemId,
+      completed_by: req.user.id,
+      is_admin_override: true, // bypass lock — user is submitting from Score tab backlog
+    });
+
+    const now = new Date();
+    const isOnTime = now.getTime() <= new Date(item.planned_at).getTime();
+    return { success: true, is_on_time: isOnTime };
+  } catch (err: any) {
+    return reply.status(400).send({ error: err.message || 'Late submit failed' });
+  }
+});
+
 server.post('/api/work-items/:id/override', { preHandler: [authenticate] }, async (req: any, reply) => {
   if (req.user.role !== 'OWNER' && req.user.role !== 'MANDATE_HOLDER') {
     return reply.status(403).send({ error: 'Permission denied' });
@@ -307,22 +387,107 @@ server.post('/api/work-items/:id/override', { preHandler: [authenticate] }, asyn
 // ----------------------------------------------------
 // 3. MIS SCORING ENGINE API
 // ----------------------------------------------------
+
+/**
+ * Convert any Date to an IST date string "YYYY-MM-DD".
+ * IST = UTC + 5h30m = UTC + 330 minutes.
+ */
+function toISTDateStr(date: Date = new Date()): string {
+  const istMs = date.getTime() + 330 * 60 * 1000;
+  return new Date(istMs).toISOString().split('T')[0]; // "YYYY-MM-DD"
+}
+
+/**
+ * Get Monday of the current IST week as a "YYYY-MM-DD" string.
+ * SQLite weekday: 0=Sun, 1=Mon … 6=Sat
+ */
+function getISTWeekStart(): string {
+  const istMs = Date.now() + 330 * 60 * 1000;
+  const dayOfWeek = new Date(istMs).getUTCDay(); // 0=Sun, 1=Mon…
+  const daysSinceMonday = (dayOfWeek + 6) % 7;   // 0 on Mon, 6 on Sun
+  const mondayMs = istMs - daysSinceMonday * 86400 * 1000;
+  return new Date(mondayMs).toISOString().split('T')[0];
+}
+
+/**
+ * Get Saturday of the current IST week as a "YYYY-MM-DD" string.
+ */
+function getISTWeekEnd(): string {
+  const istMs = Date.now() + 330 * 60 * 1000;
+  const dayOfWeek = new Date(istMs).getUTCDay();
+  const daysSinceMonday = (dayOfWeek + 6) % 7;
+  const saturdayMs = istMs + (5 - daysSinceMonday) * 86400 * 1000;
+  return new Date(saturdayMs).toISOString().split('T')[0];
+}
+
+/**
+ * Get first day of the current Indian FY quarter as "YYYY-MM-DD".
+ * FY quarters: Q1 = Apr–Jun, Q2 = Jul–Sep, Q3 = Oct–Dec, Q4 = Jan–Mar
+ */
+function getISTQuarterStart(): string {
+  const istMs = Date.now() + 330 * 60 * 1000;
+  const d = new Date(istMs);
+  const m = d.getUTCMonth(); // 0-indexed (0=Jan … 11=Dec)
+  const y = d.getUTCFullYear();
+  // Determine FY quarter start month
+  let qStartMonth: number;
+  if (m >= 3 && m <= 5) qStartMonth = 3;       // Q1: Apr
+  else if (m >= 6 && m <= 8) qStartMonth = 6;  // Q2: Jul
+  else if (m >= 9 && m <= 11) qStartMonth = 9; // Q3: Oct
+  else qStartMonth = 0;                          // Q4: Jan (same calendar year)
+  const qM = String(qStartMonth + 1).padStart(2, '0');
+  return `${y}-${qM}-01`;
+}
+
 server.get('/api/scores/my', { preHandler: [authenticate] }, async (req: any) => {
-  const period = req.query?.period || 'today';
-  let query = `
+  // Supported periods: 'daily' | 'weekly' | 'quarterly'
+  // Legacy alias: 'today' → 'daily'
+  const rawPeriod = (req.query?.period as string) || 'daily';
+  const period = rawPeriod === 'today' ? 'daily' : rawPeriod;
+
+  // ── Compute IST date boundaries (all as 'YYYY-MM-DD' strings) ──
+  const todayIST = toISTDateStr();
+  const weekStartIST = getISTWeekStart();   // Monday
+  const weekEndIST   = getISTWeekEnd();     // Saturday
+  const quarterStartIST = getISTQuarterStart();
+
+  // SQL fragment: convert a UTC timestamp column to IST date for comparison.
+  // '+330 minutes' shifts stored UTC time to IST, then DATE() extracts date part.
+  const toISTDate = `DATE(planned_at, '+330 minutes')`;
+
+  let periodFilter = '';
+  const params: string[] = [req.user.id];
+
+  if (period === 'daily') {
+    // ── DAILY: strictly today's tasks only ──
+    // Done tasks planned today + open/missed tasks planned today.
+    // No backlog from yesterday — those live in Weekly/Quarterly.
+    periodFilter = `AND ${toISTDate} = ?`;
+    params.push(todayIST);
+  } else if (period === 'weekly') {
+    // ── WEEKLY: Monday through Saturday of the current IST week ──
+    periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
+    params.push(weekStartIST, weekEndIST);
+  } else if (period === 'quarterly') {
+    // ── QUARTERLY: first day of current Indian FY quarter through today ──
+    periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
+    params.push(quarterStartIST, todayIST);
+  }
+  // Unknown period: no filter (all-time)
+
+  const query = `
     SELECT id, assignee_user_id as userId, is_important as isImportant,
            planned_at as plannedAt, completed_at as completedAt,
            status, title_en as titleEn, title_hi as titleHi,
+           source_module as sourceModule, task_type as taskType,
            flagged_false_by as flaggedFalseBy, flagged_false_reason as flaggedFalseReason
     FROM work_items
     WHERE assignee_user_id = ?
+    ${periodFilter}
+    ORDER BY planned_at ASC
   `;
 
-  if (period === 'today') {
-    query += ` AND (DATE(planned_at) = DATE('now') OR DATE(completed_at) = DATE('now'))`;
-  }
-
-  const items = db.prepare(query).all(req.user.id) as any[];
+  const items = db.prepare(query).all(...params) as any[];
 
   const formattedItems: ScoreItemInput[] = items.map((i) => ({
     ...i,
@@ -332,7 +497,11 @@ server.get('/api/scores/my', { preHandler: [authenticate] }, async (req: any) =>
   }));
 
   const scoreResult = calculateMISScore(req.user.id, formattedItems);
-  return { score: scoreResult };
+  return {
+    score: scoreResult,
+    period,
+    debug: { todayIST, weekStartIST, weekEndIST, quarterStartIST },
+  };
 });
 
 server.get('/api/scores/team', { preHandler: [authenticate] }, async (req: any, reply) => {
@@ -390,20 +559,49 @@ server.get('/api/fms/definitions', { preHandler: [authenticate] }, async () => {
 });
 
 server.get('/api/fms/flows', { preHandler: [authenticate] }, async (req: any) => {
-  const flows = db.prepare(`
+  const code = req.query.code;
+  let query = `
     SELECT f.*, u.name as started_by_name
     FROM fms_flow_instances f
     LEFT JOIN users u ON u.id = f.started_by
     WHERE f.status != 'DELETED'
-    ORDER BY f.started_at DESC
-  `).all() as any[];
+  `;
+  const params: any[] = [];
+  if (code) {
+    query += ` AND f.fms_code = ?`;
+    params.push(code);
+  }
+  query += ` ORDER BY f.started_at DESC`;
 
-  return {
-    flows: flows.map((f) => ({
-      ...f,
-      all_form_data: JSON.parse(f.all_form_data || '{}'),
-    })),
-  };
+  const flows = (db.prepare(query).all(...params) as any[]).map((f) => ({
+    ...f,
+    all_form_data: typeof f.all_form_data === 'string' ? JSON.parse(f.all_form_data || '{}') : (f.all_form_data || {}),
+  }));
+
+  return { flows, instances: flows };
+});
+
+server.get('/api/fms/instances', { preHandler: [authenticate] }, async (req: any) => {
+  const code = req.query.code;
+  let query = `
+    SELECT f.*, u.name as started_by_name
+    FROM fms_flow_instances f
+    LEFT JOIN users u ON u.id = f.started_by
+    WHERE f.status != 'DELETED'
+  `;
+  const params: any[] = [];
+  if (code) {
+    query += ` AND f.fms_code = ?`;
+    params.push(code);
+  }
+  query += ` ORDER BY f.started_at DESC`;
+
+  const flows = (db.prepare(query).all(...params) as any[]).map((f) => ({
+    ...f,
+    all_form_data: typeof f.all_form_data === 'string' ? JSON.parse(f.all_form_data || '{}') : (f.all_form_data || {}),
+  }));
+
+  return { instances: flows, flows };
 });
 
 server.get('/api/fms/flows/:id', { preHandler: [authenticate] }, async (req: any) => {
@@ -430,6 +628,59 @@ server.get('/api/fms/flows/:id', { preHandler: [authenticate] }, async (req: any
     },
   };
 });
+
+// Assignee resolver helper: supports DIRECT_USER_PHONE, SHARED_USERS, USER, and DESIGNATION
+function resolveAssigneeId(assigneeSpec: any, fallbackUserId: string): string {
+  if (!assigneeSpec) return fallbackUserId;
+
+  if (assigneeSpec.type === 'DIRECT_USER_PHONE') {
+    const user = db.prepare(`
+      SELECT id FROM users 
+      WHERE (mobile = ? OR name LIKE ?) AND is_active = 1
+      LIMIT 1
+    `).get(assigneeSpec.phone, `%${assigneeSpec.name}%`) as any;
+    if (user) return user.id;
+  } else if (assigneeSpec.type === 'SHARED_USERS' && Array.isArray(assigneeSpec.users) && assigneeSpec.users.length > 0) {
+    const u = assigneeSpec.users[0];
+    const user = db.prepare(`
+      SELECT id FROM users 
+      WHERE (mobile = ? OR name LIKE ?) AND is_active = 1
+      LIMIT 1
+    `).get(u.phone, `%${u.name}%`) as any;
+    if (user) return user.id;
+  } else if (assigneeSpec.type === 'USER') {
+    return assigneeSpec.user_id;
+  } else if (assigneeSpec.type === 'DESIGNATION') {
+    const user = db.prepare(`
+      SELECT u.id FROM users u
+      JOIN user_designations ud ON ud.user_id = u.id
+      JOIN designations d ON d.id = ud.designation_id
+      WHERE d.name LIKE ? AND u.is_active = 1
+      LIMIT 1
+    `).get(`%${assigneeSpec.designation_id}%`) as any;
+    if (user) return user.id;
+  }
+  return fallbackUserId;
+}
+
+function resolveAssigneeIds(assigneeSpec: any, fallbackUserId: string): string[] {
+  if (!assigneeSpec) return [fallbackUserId];
+
+  if (assigneeSpec.type === 'SHARED_USERS' && Array.isArray(assigneeSpec.users)) {
+    const ids: string[] = [];
+    for (const u of assigneeSpec.users) {
+      const user = db.prepare(`
+        SELECT id FROM users 
+        WHERE (mobile = ? OR name LIKE ?) AND is_active = 1
+        LIMIT 1
+      `).get(u.phone, `%${u.name}%`) as any;
+      if (user && !ids.includes(user.id)) ids.push(user.id);
+    }
+    return ids.length > 0 ? ids : [fallbackUserId];
+  }
+
+  return [resolveAssigneeId(assigneeSpec, fallbackUserId)];
+}
 
 server.post('/api/fms/start', { preHandler: [authenticate] }, async (req: any, reply) => {
   const { fms_code, form_data } = req.body;
@@ -487,52 +738,150 @@ server.post('/api/fms/start', { preHandler: [authenticate] }, async (req: any, r
   // Advance to Step 2 if exists
   if (def.steps.length > 1) {
     const step2 = def.steps[1];
-    let assigneeId = req.user.id;
-
-    // Resolve assignee
-    if (step2.assignee.type === 'DESIGNATION') {
-      const user = db.prepare(`
-        SELECT u.id FROM users u
-        JOIN user_designations ud ON ud.user_id = u.id
-        JOIN designations d ON d.id = ud.designation_id
-        WHERE d.name LIKE ? AND u.is_active = 1
-        LIMIT 1
-      `).get(`%${step2.assignee.designation_id}%`) as any;
-      if (user) assigneeId = user.id;
-    }
-
+    const assigneeIds = resolveAssigneeIds(step2.assignee, req.user.id);
     const { availableFrom, plannedAt } = calculateNextStepPlannedAt(now, step2, form_data || {}, def);
 
-    const step2WorkId = WorkItemService.createWorkItem({
-      source_module: 'fms',
-      source_ref_id: flowId,
-      fms_code,
-      step_no: 2,
-      assignee_user_id: assigneeId,
-      title_en: `[${displayNumber}] ${step2.label.en}`,
-      title_hi: `[${displayNumber}] ${step2.label.hi}`,
-      is_important: step2.is_important,
-      available_from: availableFrom,
-      planned_at: plannedAt,
-    });
+    for (const assigneeId of assigneeIds) {
+      const step2WorkId = WorkItemService.createWorkItem({
+        source_module: 'fms',
+        source_ref_id: flowId,
+        fms_code,
+        step_no: 2,
+        assignee_user_id: assigneeId,
+        title_en: `[${displayNumber}] ${step2.label.en}`,
+        title_hi: `[${displayNumber}] ${step2.label.hi}`,
+        is_important: step2.is_important,
+        available_from: availableFrom,
+        planned_at: plannedAt,
+      });
 
-    db.prepare(`
-      INSERT INTO fms_step_instances (
-        id, flow_id, step_no, repeat_index, assignee_user_id, work_item_id, status, form_data, available_from, planned_at
-      ) VALUES (?, ?, 2, 0, ?, ?, 'OPEN', '{}', ?, ?)
-    `).run(
-      randomUUID(),
-      flowId,
-      assigneeId,
-      step2WorkId,
-      availableFrom.toISOString(),
-      plannedAt.toISOString()
-    );
+      db.prepare(`
+        INSERT INTO fms_step_instances (
+          id, flow_id, step_no, repeat_index, assignee_user_id, work_item_id, status, form_data, available_from, planned_at
+        ) VALUES (?, ?, 2, 0, ?, ?, 'OPEN', '{}', ?, ?)
+      `).run(
+        randomUUID(),
+        flowId,
+        assigneeId,
+        step2WorkId,
+        availableFrom.toISOString(),
+        plannedAt.toISOString()
+      );
+    }
 
     db.prepare('UPDATE fms_flow_instances SET current_step = 2 WHERE id = ?').run(flowId);
   }
 
   return { success: true, flow_id: flowId, display_number: displayNumber };
+});
+
+// Staggered Dispatch Entry for O2D FMS
+server.post('/api/fms/o2d/add-dispatch', { preHandler: [authenticate] }, async (req: any, reply) => {
+  const { flow_id, dispatch_entry } = req.body;
+  if (!flow_id || !dispatch_entry) {
+    return reply.status(400).send({ error: 'flow_id and dispatch_entry are required' });
+  }
+
+  const billNo = (dispatch_entry.bill_no || '').trim();
+  if (!billNo) {
+    return reply.status(400).send({ error: 'Bill No. is required' });
+  }
+
+  // ── Global duplicate bill number check across ALL O2D flows ──
+  const allO2DFlows = db.prepare(
+    "SELECT id, display_number, all_form_data FROM fms_flow_instances WHERE fms_code = 'O2D' AND status != 'DELETED'"
+  ).all() as any[];
+
+  for (const f of allO2DFlows) {
+    const fData = typeof f.all_form_data === 'string'
+      ? JSON.parse(f.all_form_data || '{}')
+      : (f.all_form_data || {});
+    const existingDispatches = Array.isArray(fData.dispatches) ? fData.dispatches : [];
+    const duplicate = existingDispatches.find(
+      (d: any) => d.bill_no && d.bill_no.trim().toLowerCase() === billNo.toLowerCase()
+    );
+    if (duplicate) {
+      return reply.status(400).send({
+        error: `Bill No. "${billNo}" already exists in order ${f.display_number || f.id}. Duplicate bill numbers are not allowed.`,
+      });
+    }
+  }
+
+  const flow = db.prepare('SELECT * FROM fms_flow_instances WHERE id = ?').get(flow_id) as any;
+  if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+
+  const allFormData = JSON.parse(flow.all_form_data || '{}');
+  const dispatches = Array.isArray(allFormData.dispatches) ? allFormData.dispatches : [];
+
+  const newEntry = {
+    id: randomUUID(),
+    bill_no: billNo,
+    customer_verified: dispatch_entry.customer_verified || 'Yes Correct',
+    qty_dispatched: Number(dispatch_entry.qty_dispatched) || 0,
+    transport: dispatch_entry.transport || allFormData.transport || '',
+    created_at: new Date().toISOString(),
+    created_by: req.user.name || req.user.id,
+  };
+
+  dispatches.push(newEntry);
+
+  const totalOrdered = Number(allFormData.quantity) || 0;
+  const totalDispatched = dispatches.reduce((sum: number, d: any) => sum + (Number(d.qty_dispatched) || 0), 0);
+  const dispatchPercent = totalOrdered > 0 ? (totalDispatched / totalOrdered) * 100 : 0;
+
+  allFormData.dispatches = dispatches;
+  allFormData.total_dispatched = totalDispatched;
+  allFormData.dispatch_percent = Math.round(dispatchPercent * 10) / 10;
+
+  db.prepare('UPDATE fms_flow_instances SET all_form_data = ? WHERE id = ?').run(
+    JSON.stringify(allFormData),
+    flow_id
+  );
+
+  return {
+    success: true,
+    total_dispatched: totalDispatched,
+    dispatch_percent: allFormData.dispatch_percent,
+    dispatches,
+    auto_advance: allFormData.dispatch_percent > 120,
+    can_complete: allFormData.dispatch_percent >= 80,
+  };
+});
+
+// Remove a dispatch batch from O2D FMS
+server.post('/api/fms/o2d/remove-dispatch', { preHandler: [authenticate] }, async (req: any, reply) => {
+  const { flow_id, dispatch_id } = req.body;
+  if (!flow_id || !dispatch_id) {
+    return reply.status(400).send({ error: 'flow_id and dispatch_id are required' });
+  }
+
+  const flow = db.prepare('SELECT * FROM fms_flow_instances WHERE id = ?').get(flow_id) as any;
+  if (!flow) return reply.status(404).send({ error: 'Flow not found' });
+
+  const allFormData = JSON.parse(flow.all_form_data || '{}');
+  const dispatches = (Array.isArray(allFormData.dispatches) ? allFormData.dispatches : []).filter(
+    (d: any) => d.id !== dispatch_id
+  );
+
+  const totalOrdered = Number(allFormData.quantity) || 0;
+  const totalDispatched = dispatches.reduce((sum: number, d: any) => sum + (Number(d.qty_dispatched) || 0), 0);
+  const dispatchPercent = totalOrdered > 0 ? (totalDispatched / totalOrdered) * 100 : 0;
+
+  allFormData.dispatches = dispatches;
+  allFormData.total_dispatched = totalDispatched;
+  allFormData.dispatch_percent = Math.round(dispatchPercent * 10) / 10;
+
+  db.prepare('UPDATE fms_flow_instances SET all_form_data = ? WHERE id = ?').run(
+    JSON.stringify(allFormData),
+    flow_id
+  );
+
+  return {
+    success: true,
+    total_dispatched: totalDispatched,
+    dispatch_percent: allFormData.dispatch_percent,
+    dispatches,
+  };
 });
 
 server.post('/api/fms/submit-step', { preHandler: [authenticate] }, async (req: any, reply) => {
@@ -549,15 +898,21 @@ server.post('/api/fms/submit-step', { preHandler: [authenticate] }, async (req: 
   const now = new Date();
   const currentMergedFormData = { ...JSON.parse(flow.all_form_data || '{}'), ...form_data };
 
-  // Complete work item
+  // Complete work item(s) for this step
   if (work_item_id) {
     WorkItemService.completeWorkItem({
       work_item_id,
       completed_by: req.user.id,
     });
   }
+  // Also close any sibling work items for shared assignees on this step
+  db.prepare(`
+    UPDATE work_items 
+    SET status = 'DONE', completed_at = ?, completed_by = ?
+    WHERE source_module = 'fms' AND source_ref_id = ? AND step_no = ? AND status != 'DONE'
+  `).run(now.toISOString(), req.user.id, flow_id, step_no);
 
-  // Update step instance
+  // Update step instance(s)
   db.prepare(`
     UPDATE fms_step_instances 
     SET status = 'DONE',
@@ -592,47 +947,38 @@ server.post('/api/fms/submit-step', { preHandler: [authenticate] }, async (req: 
     return { success: true, action: 'COMPLETED' };
   }
 
-  // Resolve next assignee
-  let assigneeId = req.user.id;
-  if (nextStepDef.assignee.type === 'DESIGNATION') {
-    const u = db.prepare(`
-      SELECT u.id FROM users u
-      JOIN user_designations ud ON ud.user_id = u.id
-      JOIN designations d ON d.id = ud.designation_id
-      WHERE d.name LIKE ? AND u.is_active = 1
-      LIMIT 1
-    `).get(`%${nextStepDef.assignee.designation_id}%`) as any;
-    if (u) assigneeId = u.id;
-  }
-
+  // Resolve next assignee(s) (supports SHARED_USERS)
+  const assigneeIds = resolveAssigneeIds(nextStepDef.assignee, req.user.id);
   const { availableFrom, plannedAt } = calculateNextStepPlannedAt(now, nextStepDef, currentMergedFormData, def);
 
-  const nextWorkItemId = WorkItemService.createWorkItem({
-    source_module: 'fms',
-    source_ref_id: flow_id,
-    fms_code: flow.fms_code,
-    step_no: nextStepNo,
-    assignee_user_id: assigneeId,
-    title_en: `[${flow.display_number}] ${nextStepDef.label.en}`,
-    title_hi: `[${flow.display_number}] ${nextStepDef.label.hi}`,
-    is_important: nextStepDef.is_important,
-    available_from: availableFrom,
-    planned_at: plannedAt,
-  });
+  for (const assigneeId of assigneeIds) {
+    const nextWorkItemId = WorkItemService.createWorkItem({
+      source_module: 'fms',
+      source_ref_id: flow_id,
+      fms_code: flow.fms_code,
+      step_no: nextStepNo,
+      assignee_user_id: assigneeId,
+      title_en: `[${flow.display_number}] ${nextStepDef.label.en}`,
+      title_hi: `[${flow.display_number}] ${nextStepDef.label.hi}`,
+      is_important: nextStepDef.is_important,
+      available_from: availableFrom,
+      planned_at: plannedAt,
+    });
 
-  db.prepare(`
-    INSERT INTO fms_step_instances (
-      id, flow_id, step_no, repeat_index, assignee_user_id, work_item_id, status, form_data, available_from, planned_at
-    ) VALUES (?, ?, ?, 0, ?, ?, 'OPEN', '{}', ?, ?)
-  `).run(
-    randomUUID(),
-    flow_id,
-    nextStepNo,
-    assigneeId,
-    nextWorkItemId,
-    availableFrom.toISOString(),
-    plannedAt.toISOString()
-  );
+    db.prepare(`
+      INSERT INTO fms_step_instances (
+        id, flow_id, step_no, repeat_index, assignee_user_id, work_item_id, status, form_data, available_from, planned_at
+      ) VALUES (?, ?, ?, 0, ?, ?, 'OPEN', '{}', ?, ?)
+    `).run(
+      randomUUID(),
+      flow_id,
+      nextStepNo,
+      assigneeId,
+      nextWorkItemId,
+      availableFrom.toISOString(),
+      plannedAt.toISOString()
+    );
+  }
 
   db.prepare(`
     UPDATE fms_flow_instances 
@@ -1424,14 +1770,114 @@ server.get('/api/admin/users', { preHandler: [authenticate] }, async () => {
   return { users: userMap };
 });
 
-server.get('/api/admin/master-lists', { preHandler: [authenticate] }, async () => {
+// GET all users with their systems — for Config > Access sub-tab
+server.get('/api/admin/users-with-systems', { preHandler: [authenticate] }, async (req: any, reply) => {
+  if (req.user.role !== 'OWNER' && req.user.role !== 'MANDATE_HOLDER') {
+    return reply.status(403).send({ error: 'Permission denied' });
+  }
+
+  const users = db.prepare(`
+    SELECT id, name, mobile, role, is_active
+    FROM users
+    WHERE is_active = 1 AND role != 'OWNER'
+    ORDER BY name ASC
+  `).all() as any[];
+
+  const designations = db.prepare(`
+    SELECT ud.user_id, d.name 
+    FROM user_designations ud 
+    JOIN designations d ON d.id = ud.designation_id
+  `).all() as any[];
+
+  const allSystems = db.prepare('SELECT user_id, system_code FROM user_systems').all() as any[];
+
+  const userMap = users.map((u) => ({
+    ...u,
+    designations: designations.filter((d) => d.user_id === u.id).map((d) => d.name),
+    systems: allSystems.filter((s) => s.user_id === u.id).map((s) => s.system_code),
+  }));
+
+  return { users: userMap };
+});
+
+// PUT update a user's systems — replaces entire set atomically
+server.put('/api/admin/users/:userId/systems', { preHandler: [authenticate] }, async (req: any, reply) => {
+  if (req.user.role !== 'OWNER' && req.user.role !== 'MANDATE_HOLDER') {
+    return reply.status(403).send({ error: 'Permission denied' });
+  }
+
+  const { userId } = req.params;
+  const { systems } = req.body as { systems: string[] };
+
+  const VALID_SYSTEMS = ['CL', 'O2D', 'Purchase'];
+  const sanitized = (systems || []).filter((s) => VALID_SYSTEMS.includes(s));
+
+  // Atomic replace — delete then re-insert
+  db.prepare('DELETE FROM user_systems WHERE user_id = ?').run(userId);
+  const insert = db.prepare('INSERT INTO user_systems (user_id, system_code) VALUES (?, ?)');
+  for (const code of sanitized) {
+    insert.run(userId, code);
+  }
+
+  return { success: true, userId, systems: sanitized };
+});
+
+
+server.get('/api/admin/master-lists', { preHandler: [authenticate] }, async (req: any) => {
+  const keyFilter = req.query?.key;
+
+  // When ?key= is provided, return { items: [...] } for that specific list key
+  // This is used by O2DOrderModal dropdowns (customers, transports, agents)
+  if (keyFilter) {
+    const rows = db.prepare('SELECT item_value FROM master_lists WHERE list_key = ? ORDER BY item_value').all(keyFilter) as any[];
+    return { items: rows.map((r: any) => r.item_value) };
+  }
+
+  // Full master-lists response (used by admin views)
   const lists = db.prepare('SELECT * FROM master_lists').all() as any[];
   const grouped: Record<string, string[]> = {};
+  const detailed: Record<string, any[]> = {};
+
   for (const item of lists) {
     if (!grouped[item.list_key]) grouped[item.list_key] = [];
+    if (!detailed[item.list_key]) detailed[item.list_key] = [];
+
     grouped[item.list_key].push(item.item_value);
+    
+    let extra = {};
+    try {
+      extra = typeof item.extra_json === 'string' ? JSON.parse(item.extra_json || '{}') : (item.extra_json || {});
+    } catch {}
+
+    detailed[item.list_key].push({
+      id: item.id,
+      value: item.item_value,
+      extra,
+    });
   }
-  return { master_lists: grouped };
+  return { master_lists: grouped, detailed_lists: detailed };
+});
+
+server.post('/api/master-lists/add', { preHandler: [authenticate] }, async (req: any, reply) => {
+  const { list_key, item_value, extra } = req.body || {};
+  if (!list_key || !item_value || !item_value.trim()) {
+    return reply.status(400).send({ error: 'list_key and item_value are required' });
+  }
+
+  const cleanVal = item_value.trim();
+  const existing = db.prepare('SELECT id FROM master_lists WHERE list_key = ? AND LOWER(item_value) = LOWER(?)').get(list_key, cleanVal);
+  if (existing) {
+    return { success: true, item_value: cleanVal, already_exists: true };
+  }
+
+  const id = `ml-${list_key}-${cleanVal.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${Date.now().toString().slice(-4)}`;
+  const extraJson = JSON.stringify(extra || {});
+  
+  db.prepare('INSERT INTO master_lists (id, list_key, item_value, extra_json) VALUES (?, ?, ?, ?)').run(
+    id, list_key, cleanVal, extraJson
+  );
+
+  return { success: true, item_value: cleanVal, id };
 });
 
 server.post('/api/admin/master-lists', { preHandler: [authenticate] }, async (req: any, reply) => {
@@ -1443,6 +1889,38 @@ server.post('/api/admin/master-lists', { preHandler: [authenticate] }, async (re
     randomUUID(), list_key, item_value
   );
   return { success: true };
+});
+
+server.post('/api/upload', { preHandler: [authenticate] }, async (req: any, reply) => {
+  try {
+    if (req.isMultipart && req.isMultipart()) {
+      const data = await req.file();
+      if (!data) return reply.status(400).send({ error: 'No file uploaded' });
+      const ext = path.extname(data.filename) || '.jpg';
+      const fileName = `upload-${randomUUID()}${ext}`;
+      const filePath = path.join(UPLOADS_DIR, fileName);
+      const buffer = await data.toBuffer();
+      fs.writeFileSync(filePath, buffer);
+      return { success: true, url: `/uploads/${fileName}` };
+    }
+
+    // Base64 JSON fallback
+    const { base64Data, fileName: origName } = req.body || {};
+    if (!base64Data) {
+      return reply.status(400).send({ error: 'base64Data or multipart file required' });
+    }
+
+    const matches = base64Data.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+    const buffer = matches ? Buffer.from(matches[2], 'base64') : Buffer.from(base64Data, 'base64');
+    const ext = origName ? path.extname(origName) : '.jpg';
+    const fileName = `upload-${randomUUID()}${ext || '.jpg'}`;
+    const filePath = path.join(UPLOADS_DIR, fileName);
+    fs.writeFileSync(filePath, buffer);
+
+    return { success: true, url: `/uploads/${fileName}` };
+  } catch (err: any) {
+    return reply.status(500).send({ error: err.message || 'Upload failed' });
+  }
 });
 
 server.get('/api/admin/health', { preHandler: [authenticate] }, async () => {

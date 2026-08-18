@@ -791,7 +791,7 @@ export async function seedDatabase() {
 
   for (const staff of staffMembers) {
     const userId = `user-${staff.contact}`;
-    const userRole = (staff.name === 'KR' || staff.desig === 'CEO') ? 'MANDATE_HOLDER' : 'USER';
+    const userRole = 'USER';
     
     insertUser.run(
       userId,
@@ -804,18 +804,160 @@ export async function seedDatabase() {
       now
     );
 
+    // Ensure role is USER for staff members including KR
+    db.prepare("UPDATE users SET role = 'USER' WHERE mobile = ?").run(staff.contact);
+
     const desigId = desigMap.get(staff.desig);
     if (desigId) {
       insertUserDesig.run(userId, desigId);
     }
   }
 
+  // 4b. Seed User Systems from CSV (Process Involvement column)
+  // System codes: CL = Checklist, O2D = Order to Delivery, Purchase = Purchase FMS
+  const insertUserSystem = db.prepare('INSERT OR IGNORE INTO user_systems (user_id, system_code) VALUES (?, ?)');
+
+  // Users with O2D access (in addition to CL)
+  const o2dUsers = ['7771002882', '9009200757', '8109014198', '6267888249']; // Akash Soni, Lalita Yadav, KR, Himanshu Gurjar
+  // Users with Purchase access (in addition to CL)
+  const purchaseUsers = ['8109014198', '7771000411', '7879883549', '9399906456', '8839364733']; // KR, Manoj Bhaiya, Sanjay Malakar, Santosh Rajput, Sapna Sahu
+
+  for (const staff of staffMembers) {
+    const uid = `user-${staff.contact}`;
+    // Everyone gets CL
+    insertUserSystem.run(uid, 'CL');
+    if (o2dUsers.includes(staff.contact)) {
+      insertUserSystem.run(uid, 'O2D');
+    }
+    if (purchaseUsers.includes(staff.contact)) {
+      insertUserSystem.run(uid, 'Purchase');
+    }
+  }
+  // Owner and Mandate Holder get all systems
+  insertUserSystem.run('user-owner', 'CL');
+  insertUserSystem.run('user-owner', 'O2D');
+  insertUserSystem.run('user-owner', 'Purchase');
+  insertUserSystem.run('user-mandate', 'CL');
+  insertUserSystem.run('user-mandate', 'O2D');
+  insertUserSystem.run('user-mandate', 'Purchase');
+
+
   // 5. Seed Master Lists
   const insertMaster = db.prepare('INSERT OR IGNORE INTO master_lists (id, list_key, item_value, extra_json) VALUES (?, ?, ?, ?)');
+  
+  const fabricList = [
+    { en: '104 Matty', hi: '104 मैटी' },
+    { en: 'Cotton Print', hi: 'कॉटन प्रिंट' },
+    { en: 'Denim', hi: 'डेनिम' },
+    { en: 'Digital Satan (Tain dain)', hi: 'डिजिटल शैतान (टैन डैन)' },
+    { en: 'Hangama Bubble', hi: 'हंगामा बबल' },
+    { en: 'Kenzo plain', hi: 'केन्ज़ो प्लेन' },
+    { en: 'Kenzo Print', hi: 'केन्ज़ो प्रिंट' },
+    { en: 'Nato Checks Bubble', hi: 'नाटो चेक बबल' },
+    { en: 'Nykra', hi: 'नाइकरा' },
+    { en: 'Platting plain', hi: 'समतल प्लॉटिंग' },
+    { en: 'RFD', hi: 'आरएफडी' },
+    { en: 'RIB print', hi: 'आरआईबी प्रिंट' },
+    { en: 'Riyan 22kg', hi: 'रियान 22 किग्रा' },
+    { en: 'Riyan Foil', hi: 'रियान फ़ॉइल' },
+    { en: 'Riyan Plain', hi: 'रियान मैदान' },
+    { en: 'Riyan print', hi: 'रियान प्रिंट' },
+    { en: 'Saree crap', hi: 'साड़ी बकवास' },
+    { en: 'Satan foil', hi: 'शैतान विफल' },
+    { en: 'Satan plain', hi: 'शैतान सादा' },
+    { en: 'Seemar platting', hi: 'सीमार प्लैटिंग' },
+    { en: 'Sincker', hi: 'सिंकर' },
+    { en: 'Tain dain Print ( Vishnu Foil /Digital print)', hi: 'टैन डैन प्रिंट (विष्णु फ़ॉइल/डिजिटल प्रिंट)' },
+    { en: 'Tencil Plain', hi: 'टेन्सिल प्लेन' },
+    { en: 'Vako RIB plain', hi: 'वाको आरआईबी प्लेन' },
+  ];
+
+  for (const f of fabricList) {
+    insertMaster.run(
+      `ml-fabrics-${f.en.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+      'fabrics',
+      f.en,
+      JSON.stringify({ hindi: f.hi })
+    );
+  }
+
+  const agentList = [
+    { name: 'Mansi Textiles', phone: '9165072008' },
+    { name: 'shekhani Textiles', phone: '8109385126' },
+    { name: 'Ramesh Bhai Agency', phone: '9876543210' },
+    { name: 'Deepak Brokerage', phone: '9826012345' },
+    { name: 'Direct Buyer Account', phone: '9000000000' },
+    { name: 'Mukesh Sharma & Sons', phone: '9827011223' },
+  ];
+
+  for (const ag of agentList) {
+    insertMaster.run(
+      `ml-agents-${ag.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+      'agents',
+      ag.name,
+      JSON.stringify({ phone: ag.phone })
+    );
+  }
+
+  const transportList = [
+    'VRL LOGISTICS',
+    'SAFEX EXPRESS',
+    'XPS',
+    'YASHWANT',
+    'KTC',
+    'EXPRESS BEES',
+    'BATCO',
+    'GATI',
+    'RIVEGO',
+    'SRD',
+    'MAHARAJA CARRIER',
+    'BALAJI',
+    'GOLDEN',
+    'OM LOGISTICS',
+    'BLUE DART',
+    'TCL LUCKY BAGGA',
+    'MAHARAJA RAIL',
+    'GIRNAR',
+    'ARCL',
+    'IRC',
+    'OK EXPRESS',
+    'APS',
+  ];
+
+  for (const tr of transportList) {
+    insertMaster.run(
+      `ml-transports-${tr.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+      'transports',
+      tr,
+      '{}'
+    );
+  }
+
   const masterData: Record<string, string[]> = {
-    customers: ['Shree Ganesh Textiles (Indore)', 'Vardhman Apparels (Surat)', 'Bombay Garments (Mumbai)', 'Surat Fashion Hub', 'Jaipur Cottons Corp', 'Mahalaxmi Fabrics'],
-    transports: ['V-Trans India Ltd', 'Gati-KWE Express', 'TCI Freight Logistics', 'Jaipur Golden Transport', 'Local Delivery Tempo'],
-    agents: ['Ramesh Bhai Agency', 'Deepak Brokerage', 'Direct Buyer Account', 'Mukesh Sharma & Sons'],
+    customers: [
+      'A To Z Emporium,Kanpur',
+      'A.K. Jauali',
+      'Abc, Bihar',
+      'Ahmed Brothers,Trichy',
+      'Akash Silk Readymade Tiruvannmalai',
+      'Ananda The Family Shop, Chennai',
+      'Andavr Fashion,Gummidipoondi',
+      'Ar Rehman Singapore Textiles',
+      'Aruna Silks',
+      'Ashvin Silks Wanpet',
+      'Athikalathu Alagngara Maligai,Pudukkottai',
+      'Aura Clothing, Chidambaram',
+      'Bhairavi Textiles Rasipuram',
+      'Bismi Cut Peice',
+      'Bsc Texlile, Davanagere',
+      'Bsc, Shivamoga',
+      'Shree Ganesh Textiles (Indore)',
+      'Vardhman Apparels (Surat)',
+      'Bombay Garments (Mumbai)',
+      'Surat Fashion Hub',
+      'Jaipur Cottons Corp',
+      'Mahalaxmi Fabrics',
+    ],
     vendors: ['Arvind Mills Ltd', 'Vardhman Polytex', 'KCT Buttons & Zippers', 'Surat Quality Thread Mart', 'Apex Labels & Tags'],
     thekedars: ['Master Aslam (Unit 1 Stitching)', 'Master Raju (Kurti Specialist)', 'Ramesh Thekedar', 'Irfan Bhai Cutting & Tailoring'],
     pressmen: ['Rakesh Pressman', 'Suresh Steam Ironing', 'Dinesh Finishing & Press'],

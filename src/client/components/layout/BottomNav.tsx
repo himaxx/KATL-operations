@@ -22,14 +22,14 @@ export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, onTabChange }) 
         { id: 'overview', label: 'Overview', icon: Eye },
         { id: 'scores',   label: 'Performance', icon: BarChart2 },
         { id: 'systems',  label: 'Systems', icon: Layers },
-        { id: 'manage',   label: 'Manage', icon: Settings },
+        { id: 'manage',   label: 'Config', icon: Settings },
       ]
     : isMandate
     ? [
         { id: 'home',    label: 'Home', icon: Home },
         { id: 'scores',  label: 'Performance', icon: BarChart2 },
         { id: 'systems', label: 'Systems', icon: Layers },
-        { id: 'manage',  label: 'Manage', icon: Settings },
+        { id: 'manage',  label: 'Config', icon: Settings },
       ]
     : [
         { id: 'home',    label: 'Home', icon: Home },

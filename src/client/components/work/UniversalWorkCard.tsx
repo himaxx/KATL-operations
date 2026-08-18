@@ -111,8 +111,16 @@ export const UniversalWorkCard: React.FC<UniversalWorkCardProps> = ({ item, onAc
   const isLocked = Boolean(item.is_locked);
   const isLate = !isDone && !isLocked && new Date() > new Date(item.planned_at);
   const taskType = item.task_type || (item.source_module === 'fms' ? 'FMS' : item.source_module === 'delegation' ? 'DELEGATION' : 'REPETITIVE');
-
-  const style = TASK_TYPE_STYLES[taskType] || TASK_TYPE_STYLES.REPETITIVE;
+  const isO2D = item.source_module === 'fms' && item.fms_code === 'O2D';
+  const style = isO2D
+    ? {
+        borderColor: 'border-l-sky-500 border-sky-200',
+        bgColor: 'bg-sky-50',
+        badgeBg: 'bg-sky-100 border-sky-200',
+        badgeText: 'text-sky-800',
+        label: 'O2D Flow',
+      }
+    : TASK_TYPE_STYLES[taskType] || TASK_TYPE_STYLES.REPETITIVE;
 
   const title =
     (language === 'hi' || language === 'hi_ro') && item.title_hi ? item.title_hi : item.title_en;
@@ -125,14 +133,17 @@ export const UniversalWorkCard: React.FC<UniversalWorkCardProps> = ({ item, onAc
 
   return (
     <div
-      className={`rounded-2xl border border-l-[3px] transition-all duration-150 ${style.borderColor} ${
+      onClick={!isDone && !isLocked ? () => onAction(item) : undefined}
+      className={`rounded-2xl border border-l-[3px] transition-all duration-150 ${
+        !isDone && !isLocked ? 'cursor-pointer active:scale-[0.99]' : ''
+      } ${style.borderColor} ${
         isDone
           ? 'bg-white border-[#D1FAE5]'
           : isLocked
           ? 'bg-[#F9FAFB] border-[#E8ECF0] opacity-80'
           : isLate
           ? `${style.bgColor} border-[#F9BFDF]`
-          : `${style.bgColor} hover:border-[#D1D5DB]`
+          : `${style.bgColor} hover:border-pink-brand/60 shadow-xs`
       }`}
     >
       <div className="p-4 flex items-center justify-between gap-3">

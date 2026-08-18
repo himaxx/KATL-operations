@@ -8,6 +8,7 @@ export interface AuthUser {
   role: 'OWNER' | 'MANDATE_HOLDER' | 'USER';
   designations: string[];
   capabilities: string[];
+  systems: string[];
   selfie_url?: string;
   requiresNewPin?: boolean;
 }

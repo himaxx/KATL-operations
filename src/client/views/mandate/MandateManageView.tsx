@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useLanguage } from '../../context/LanguageContext';
-import { Users, Key, Plus, CheckCircle2, MessageSquare, Database, Calendar } from 'lucide-react';
+import { Users, Key, Plus, CheckCircle2, MessageSquare, Database, Calendar, ShieldCheck } from 'lucide-react';
+import { SystemAccessView } from './SystemAccessView';
 
 export const MandateManageView: React.FC = () => {
   const { t } = useLanguage();
@@ -9,7 +10,7 @@ export const MandateManageView: React.FC = () => {
   const [masterLists, setMasterLists] = useState<Record<string, string[]>>({});
   const [selectedListKey, setSelectedListKey] = useState('customers');
   const [newMasterItem, setNewMasterItem] = useState('');
-  const [activeTab, setActiveTab] = useState<'users' | 'slips' | 'masters'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'slips' | 'masters' | 'access'>('users');
   const [tempPinData, setTempPinData] = useState<{ name: string; pin: string } | null>(null);
   const [replyingSlipId, setReplyingSlipId] = useState<string | null>(null);
   const [replyText, setReplyText] = useState('');
@@ -106,18 +107,18 @@ export const MandateManageView: React.FC = () => {
     <div className="space-y-4 pb-20 max-w-md mx-auto px-4 pt-4">
       <div>
         <h2 className="text-xl font-extrabold text-navy-900">{t.navManage}</h2>
-        <p className="text-xs font-medium text-slate-500">Master Operations: Staff, PIN Resets & Master Lists</p>
+        <p className="text-xs font-medium text-slate-500">Staff, PIN Resets, Master Lists &amp; System Access</p>
       </div>
 
       {/* Sub Tabs */}
-      <div className="grid grid-cols-3 gap-1 p-1 bg-slate-200/80 rounded-2xl text-xs font-extrabold">
+      <div className="grid grid-cols-4 gap-1 p-1 bg-slate-200/80 rounded-2xl text-xs font-extrabold">
         <button
           onClick={() => setActiveTab('users')}
           className={`py-2 rounded-xl transition ${
             activeTab === 'users' ? 'bg-navy-900 text-white shadow-sm' : 'text-slate-600'
           }`}
         >
-          Staff & PINs
+          Staff
         </button>
         <button
           onClick={() => setActiveTab('slips')}
@@ -125,7 +126,7 @@ export const MandateManageView: React.FC = () => {
             activeTab === 'slips' ? 'bg-navy-900 text-white shadow-sm' : 'text-slate-600'
           }`}
         >
-          Help Slips {helpSlips.filter((s) => s.status === 'ASKED').length > 0 && '🔴'}
+          Slips {helpSlips.filter((s) => s.status === 'ASKED').length > 0 && '🔴'}
         </button>
         <button
           onClick={() => setActiveTab('masters')}
@@ -133,7 +134,15 @@ export const MandateManageView: React.FC = () => {
             activeTab === 'masters' ? 'bg-navy-900 text-white shadow-sm' : 'text-slate-600'
           }`}
         >
-          Master Lists
+          Lists
+        </button>
+        <button
+          onClick={() => setActiveTab('access')}
+          className={`py-2 rounded-xl transition ${
+            activeTab === 'access' ? 'bg-navy-900 text-white shadow-sm' : 'text-slate-600'
+          }`}
+        >
+          Access
         </button>
       </div>
 
@@ -303,6 +312,17 @@ export const MandateManageView: React.FC = () => {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* TAB 4: System Access Management */}
+      {activeTab === 'access' && (
+        <div className="space-y-3">
+          <div className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            System Access Control
+          </div>
+          <SystemAccessView />
         </div>
       )}
     </div>

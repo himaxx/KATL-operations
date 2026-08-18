@@ -9,7 +9,7 @@ export type TAT =
   | { kind: 'FIXED_DAYS'; days: number }
   | { kind: 'DYNAMIC'; from_step: number; field_key: string; unit: 'HOURS' | 'DAYS' };
 
-export type QuestionType = 'text' | 'number' | 'select' | 'date' | 'file' | 'master_list';
+export type QuestionType = 'text' | 'number' | 'select' | 'multi_select' | 'date' | 'file' | 'master_list';
 
 export interface Question {
   key: string;
@@ -44,7 +44,9 @@ export interface FmsStep {
   assignee: 
     | { type: 'USER'; user_id: string }
     | { type: 'DESIGNATION'; designation_id: string } // For step 1 open-entry
-    | { type: 'DYNAMIC_USER'; from_step: number; field_key: string };
+    | { type: 'DYNAMIC_USER'; from_step: number; field_key: string }
+    | { type: 'DIRECT_USER_PHONE'; phone: string; name: string }
+    | { type: 'SHARED_USERS'; users: Array<{ phone: string; name: string }> };
   is_important: boolean; // 3x weight
   tat: TAT; // "When"
   questions: Question[]; // The form

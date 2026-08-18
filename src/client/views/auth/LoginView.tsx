@@ -34,11 +34,34 @@ export const LoginView: React.FC = () => {
     }
   };
 
-  const quickFill = (type: 'staff' | 'admin', v1: string, v2: string) => {
+  const quickFill = async (type: 'staff' | 'admin', v1: string, v2: string) => {
     setTab(type);
     setError(null);
-    if (type === 'staff') { setMobile(v1); setPin(v2); }
-    else { setUsername(v1); setPassword(v2); }
+    if (type === 'staff') {
+      setMobile(v1);
+      setPin(v2);
+      setLoading(true);
+      try {
+        const res = await loginStaff(v1, v2);
+        if (!res.success) setError(res.error || 'Login failed');
+      } catch (err: any) {
+        setError(err.message || 'Login error');
+      } finally {
+        setLoading(false);
+      }
+    } else {
+      setUsername(v1);
+      setPassword(v2);
+      setLoading(true);
+      try {
+        const res = await loginAdmin(v1, v2);
+        if (!res.success) setError(res.error || 'Login failed');
+      } catch (err: any) {
+        setError(err.message || 'Login error');
+      } finally {
+        setLoading(false);
+      }
+    }
   };
 
   return (
