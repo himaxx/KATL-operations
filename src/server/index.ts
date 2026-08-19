@@ -8,11 +8,12 @@ import fs from 'fs';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { db, initDatabase } from './db';
-import { seedDatabase } from './seed';
+import { seedDatabase, ensureDailyWorkItemsForToday } from './seed';
 import { WorkItemService } from './services/workItemService';
 import { calculateMISScore, ScoreItemInput } from '../core/scoring/engine';
 import { fmsRegistry, calculateNextStepPlannedAt, evaluateBranches, formatFmsDisplayNumber } from '../fms';
 import { workingHoursBetween, addWorkingTime, getISTComponents } from '../core/working-time/engine';
+import { O2CScheduler } from './services/o2cScheduler';
 import { randomUUID } from 'crypto';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'katl-ops-super-secret-jwt-key-2026';
@@ -215,7 +216,7 @@ server.get('/api/auth/me', { preHandler: [authenticate] }, async (req: any) => {
         ? ['DELAY_DASHBOARD', 'AUDIT', 'DELEGATION_SHEET', 'VIDEO_BACKLOG', 'IMPORTANT_MISS_ALERT']
         : capabilities,
       systems: user.role === 'OWNER' || user.role === 'MANDATE_HOLDER'
-        ? ['CL', 'O2D', 'Purchase']
+        ? ['CL', 'O2C', 'Purchase']
         : systems,
     },
   };
@@ -263,7 +264,7 @@ server.get('/api/work-items/my', { preHandler: [authenticate] }, async (req: any
   // • DELEGATION tasks (source_module='delegation'): always show if OPEN (pinned until done)
   // • COMPLIANCE tasks (task_type='COMPLIANCE'): always show if OPEN (pinned until done)
   // • Regular checklist / FMS tasks: only show today's (planned today OR completed today)
-  const items = db.prepare(`
+  let items = db.prepare(`
     SELECT * FROM work_items
     WHERE assignee_user_id = ?
       AND (
@@ -274,9 +275,9 @@ server.get('/api/work-items/my', { preHandler: [authenticate] }, async (req: any
         -- Open FMS tasks are ALWAYS visible until done
         OR (source_module = 'fms' AND status != 'DONE')
         -- Today's regular tasks (open or completed today)
-        OR (DATE(planned_at, 'localtime') = DATE('now', 'localtime') AND source_module != 'delegation' AND task_type != 'COMPLIANCE')
+        OR ((planned_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND source_module != 'delegation' AND task_type != 'COMPLIANCE')
         -- Any task completed today (to keep visible in list after submit)
-        OR DATE(completed_at, 'localtime') = DATE('now', 'localtime')
+        OR ((completed_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date)
       )
     ORDER BY
       -- Pinned group (DELEGATION + COMPLIANCE) comes first
@@ -290,6 +291,33 @@ server.get('/api/work-items/my', { preHandler: [authenticate] }, async (req: any
       is_important DESC,
       planned_at ASC
   `).all(req.user.id) as any[];
+
+  // If no items returned, ensure today's checklist work items exist and retry
+  if (items.length === 0) {
+    try {
+      ensureDailyWorkItemsForToday();
+      items = db.prepare(`
+        SELECT * FROM work_items
+        WHERE assignee_user_id = ?
+          AND (
+            (source_module = 'delegation' AND status != 'DONE')
+            OR (task_type = 'COMPLIANCE' AND status != 'DONE')
+            OR (source_module = 'fms' AND status != 'DONE')
+            OR ((planned_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date AND source_module != 'delegation' AND task_type != 'COMPLIANCE')
+            OR ((completed_at AT TIME ZONE 'Asia/Kolkata')::date = (NOW() AT TIME ZONE 'Asia/Kolkata')::date)
+          )
+        ORDER BY
+          CASE
+            WHEN source_module = 'delegation' AND status != 'DONE' THEN 0
+            WHEN task_type = 'COMPLIANCE' AND status != 'DONE' THEN 0
+            ELSE 1
+          END ASC,
+          CASE WHEN status = 'DONE' THEN 1 ELSE 0 END ASC,
+          is_important DESC,
+          planned_at ASC
+      `).all(req.user.id) as any[];
+    } catch (_) {}
+  }
 
   const now = new Date();
   const enhancedItems = items.map((item) => {
@@ -421,35 +449,66 @@ function getISTWeekEnd(): string {
 }
 
 /**
- * Get first day of the current Indian FY quarter as "YYYY-MM-DD".
+ * Get first day of the current IST month as "YYYY-MM-DD".
+ */
+function getISTMonthStart(): string {
+  const istMs = Date.now() + 330 * 60 * 1000;
+  const d = new Date(istMs);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  return `${y}-${m}-01`;
+}
+
+/**
+ * Get last day of the current IST month as "YYYY-MM-DD".
+ */
+function getISTMonthEnd(): string {
+  const istMs = Date.now() + 330 * 60 * 1000;
+  const d = new Date(istMs);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth(); // 0-indexed
+  const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  const mStr = String(m + 1).padStart(2, '0');
+  const dStr = String(lastDay).padStart(2, '0');
+  return `${y}-${mStr}-${dStr}`;
+}
+
+/**
+ * Get start and end date of the current Indian FY quarter as "YYYY-MM-DD".
  * FY quarters: Q1 = Apr–Jun, Q2 = Jul–Sep, Q3 = Oct–Dec, Q4 = Jan–Mar
  */
-function getISTQuarterStart(): string {
+function getISTQuarterRange(): { start: string; end: string } {
   const istMs = Date.now() + 330 * 60 * 1000;
   const d = new Date(istMs);
   const m = d.getUTCMonth(); // 0-indexed (0=Jan … 11=Dec)
   const y = d.getUTCFullYear();
-  // Determine FY quarter start month
-  let qStartMonth: number;
-  if (m >= 3 && m <= 5) qStartMonth = 3;       // Q1: Apr
-  else if (m >= 6 && m <= 8) qStartMonth = 6;  // Q2: Jul
-  else if (m >= 9 && m <= 11) qStartMonth = 9; // Q3: Oct
-  else qStartMonth = 0;                          // Q4: Jan (same calendar year)
-  const qM = String(qStartMonth + 1).padStart(2, '0');
-  return `${y}-${qM}-01`;
+  if (m >= 3 && m <= 5) {
+    return { start: `${y}-04-01`, end: `${y}-06-30` }; // Q1
+  } else if (m >= 6 && m <= 8) {
+    return { start: `${y}-07-01`, end: `${y}-09-30` }; // Q2
+  } else if (m >= 9 && m <= 11) {
+    return { start: `${y}-10-01`, end: `${y}-12-31` }; // Q3
+  } else {
+    return { start: `${y}-01-01`, end: `${y}-03-31` }; // Q4
+  }
 }
 
 server.get('/api/scores/my', { preHandler: [authenticate] }, async (req: any) => {
-  // Supported periods: 'daily' | 'weekly' | 'quarterly'
-  // Legacy alias: 'today' → 'daily'
+  // Supported periods: 'daily' | 'weekly' | 'monthly' | 'quarterly'
   const rawPeriod = (req.query?.period as string) || 'daily';
-  const period = rawPeriod === 'today' ? 'daily' : rawPeriod;
+  let period = rawPeriod.toLowerCase();
+  if (period === 'today') period = 'daily';
+  if (period === 'this_week') period = 'weekly';
+  if (period === 'this_month') period = 'monthly';
+  if (period === 'this_quarter') period = 'quarterly';
 
   // ── Compute IST date boundaries (all as 'YYYY-MM-DD' strings) ──
   const todayIST = toISTDateStr();
   const weekStartIST = getISTWeekStart();   // Monday
   const weekEndIST   = getISTWeekEnd();     // Saturday
-  const quarterStartIST = getISTQuarterStart();
+  const monthStartIST = getISTMonthStart();
+  const monthEndIST   = getISTMonthEnd();
+  const quarterRange  = getISTQuarterRange();
 
   // SQL fragment: convert a UTC timestamp column to IST date for comparison.
   // '+330 minutes' shifts stored UTC time to IST, then DATE() extracts date part.
@@ -460,27 +519,27 @@ server.get('/api/scores/my', { preHandler: [authenticate] }, async (req: any) =>
 
   if (period === 'daily') {
     // ── DAILY: strictly today's tasks only ──
-    // Done tasks planned today + open/missed tasks planned today.
-    // No backlog from yesterday — those live in Weekly/Quarterly.
     periodFilter = `AND ${toISTDate} = ?`;
     params.push(todayIST);
   } else if (period === 'weekly') {
     // ── WEEKLY: Monday through Saturday of the current IST week ──
     periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
     params.push(weekStartIST, weekEndIST);
-  } else if (period === 'quarterly') {
-    // ── QUARTERLY: first day of current Indian FY quarter through today ──
+  } else if (period === 'monthly') {
+    // ── MONTHLY: first day through last day of current IST month ──
     periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
-    params.push(quarterStartIST, todayIST);
+    params.push(monthStartIST, monthEndIST);
+  } else if (period === 'quarterly') {
+    // ── QUARTERLY: current Indian FY quarter date range ──
+    periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
+    params.push(quarterRange.start, quarterRange.end);
   }
   // Unknown period: no filter (all-time)
 
   const query = `
-    SELECT id, assignee_user_id as userId, is_important as isImportant,
-           planned_at as plannedAt, completed_at as completedAt,
-           status, title_en as titleEn, title_hi as titleHi,
-           source_module as sourceModule, task_type as taskType,
-           flagged_false_by as flaggedFalseBy, flagged_false_reason as flaggedFalseReason
+    SELECT id, assignee_user_id, is_important, planned_at, completed_at,
+           status, title_en, title_hi, source_module, task_type,
+           flagged_false_by, flagged_false_reason
     FROM work_items
     WHERE assignee_user_id = ?
     ${periodFilter}
@@ -490,17 +549,25 @@ server.get('/api/scores/my', { preHandler: [authenticate] }, async (req: any) =>
   const items = db.prepare(query).all(...params) as any[];
 
   const formattedItems: ScoreItemInput[] = items.map((i) => ({
-    ...i,
-    isImportant: Boolean(i.isImportant),
-    plannedAt: new Date(i.plannedAt),
-    completedAt: i.completedAt ? new Date(i.completedAt) : null,
+    id: i.id,
+    userId: i.assignee_user_id || i.userId || i.userid,
+    isImportant: Boolean(i.is_important ?? i.isImportant ?? i.isimportant),
+    plannedAt: new Date(i.planned_at || i.plannedAt || i.plannedat),
+    completedAt: (i.completed_at || i.completedAt || i.completedat) ? new Date(i.completed_at || i.completedAt || i.completedat) : null,
+    status: i.status,
+    titleEn: i.title_en || i.titleEn || i.titleen || '',
+    titleHi: i.title_hi || i.titleHi || i.titlehi || '',
+    sourceModule: i.source_module || i.sourceModule || i.sourcemodule,
+    taskType: i.task_type || i.taskType || i.tasktype,
+    flaggedFalseBy: i.flagged_false_by || i.flaggedFalseBy || i.flaggedfalseby,
+    flaggedFalseReason: i.flagged_false_reason || i.flaggedFalseReason || i.flaggedfalsereason,
   }));
 
   const scoreResult = calculateMISScore(req.user.id, formattedItems);
   return {
     score: scoreResult,
     period,
-    debug: { todayIST, weekStartIST, weekEndIST, quarterStartIST },
+    debug: { todayIST, weekStartIST, weekEndIST, monthStartIST, monthEndIST, quarterRange },
   };
 });
 
@@ -509,34 +576,72 @@ server.get('/api/scores/team', { preHandler: [authenticate] }, async (req: any, 
     return reply.status(403).send({ error: 'Permission denied' });
   }
 
-  const period = req.query?.period || 'today';
-  const users = db.prepare('SELECT id, name, mobile, role FROM users WHERE is_active = 1').all() as any[];
+  const rawPeriod = (req.query?.period as string) || 'daily';
+  let period = rawPeriod.toLowerCase();
+  if (period === 'today') period = 'daily';
+  if (period === 'this_week') period = 'weekly';
+  if (period === 'this_month') period = 'monthly';
+  if (period === 'this_quarter') period = 'quarterly';
+
+  const todayIST = toISTDateStr();
+  const weekStartIST = getISTWeekStart();
+  const weekEndIST   = getISTWeekEnd();
+  const monthStartIST = getISTMonthStart();
+  const monthEndIST   = getISTMonthEnd();
+  const quarterRange  = getISTQuarterRange();
+
+  const toISTDate = `DATE(planned_at, '+330 minutes')`;
+
+  let periodFilter = '';
+  let dateParams: string[] = [];
+
+  if (period === 'daily') {
+    periodFilter = `AND ${toISTDate} = ?`;
+    dateParams = [todayIST];
+  } else if (period === 'weekly') {
+    periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
+    dateParams = [weekStartIST, weekEndIST];
+  } else if (period === 'monthly') {
+    periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
+    dateParams = [monthStartIST, monthEndIST];
+  } else if (period === 'quarterly') {
+    periodFilter = `AND ${toISTDate} >= ? AND ${toISTDate} <= ?`;
+    dateParams = [quarterRange.start, quarterRange.end];
+  }
+
+  const users = db.prepare('SELECT id, name, mobile, role FROM users WHERE is_active = 1 ORDER BY name ASC').all() as any[];
   
   const teamScores = users.map((u) => {
-    let query = `
-      SELECT id, assignee_user_id as userId, is_important as isImportant,
-             planned_at as plannedAt, completed_at as completedAt,
-             status, title_en as titleEn, title_hi as titleHi,
-             flagged_false_by as flaggedFalseBy
+    const query = `
+      SELECT id, assignee_user_id, is_important, planned_at, completed_at,
+             status, title_en, title_hi, source_module, task_type,
+             flagged_false_by, flagged_false_reason
       FROM work_items
       WHERE assignee_user_id = ?
+      ${periodFilter}
+      ORDER BY planned_at ASC
     `;
 
-    if (period === 'today') {
-      query += ` AND (DATE(planned_at) = DATE('now') OR DATE(completed_at) = DATE('now'))`;
-    }
-
-    const items = db.prepare(query).all(u.id) as any[];
+    const items = db.prepare(query).all(u.id, ...dateParams) as any[];
 
     const formatted: ScoreItemInput[] = items.map((i) => ({
-      ...i,
-      isImportant: Boolean(i.isImportant),
-      plannedAt: new Date(i.plannedAt),
-      completedAt: i.completedAt ? new Date(i.completedAt) : null,
+      id: i.id,
+      userId: i.assignee_user_id || i.userId || i.userid,
+      isImportant: Boolean(i.is_important ?? i.isImportant ?? i.isimportant),
+      plannedAt: new Date(i.planned_at || i.plannedAt || i.plannedat),
+      completedAt: (i.completed_at || i.completedAt || i.completedat) ? new Date(i.completed_at || i.completedAt || i.completedat) : null,
+      status: i.status,
+      titleEn: i.title_en || i.titleEn || i.titleen || '',
+      titleHi: i.title_hi || i.titleHi || i.titlehi || '',
+      sourceModule: i.source_module || i.sourceModule || i.sourcemodule,
+      taskType: i.task_type || i.taskType || i.tasktype,
+      flaggedFalseBy: i.flagged_false_by || i.flaggedFalseBy || i.flaggedfalseby,
+      flaggedFalseReason: i.flagged_false_reason || i.flaggedFalseReason || i.flaggedfalsereason,
     }));
 
     const score = calculateMISScore(u.id, formatted);
     return {
+      ...score,
       userId: u.id,
       name: u.name,
       mobile: u.mobile,
@@ -544,11 +649,14 @@ server.get('/api/scores/team', { preHandler: [authenticate] }, async (req: any, 
       totalTasks: items.length,
       doneTasksCount: score.doneItems.length,
       pendingTasksCount: score.notDoneItems.length,
-      ...score,
     };
   });
 
-  return { team_scores: teamScores };
+  return { 
+    team_scores: teamScores,
+    period,
+    debug: { todayIST, weekStartIST, weekEndIST, monthStartIST, monthEndIST, quarterRange }
+  };
 });
 
 // ----------------------------------------------------
@@ -775,8 +883,112 @@ server.post('/api/fms/start', { preHandler: [authenticate] }, async (req: any, r
   return { success: true, flow_id: flowId, display_number: displayNumber };
 });
 
-// Staggered Dispatch Entry for O2D FMS
-server.post('/api/fms/o2d/add-dispatch', { preHandler: [authenticate] }, async (req: any, reply) => {
+// ----------------------------------------------------
+// CUSTOMER CRM MASTER APIs
+// ----------------------------------------------------
+server.get('/api/customers', { preHandler: [authenticate] }, async (req: any) => {
+  const search = (req.query.search || '').trim();
+  let customers;
+  if (search) {
+    customers = db.prepare(`
+      SELECT * FROM customers 
+      WHERE name ILIKE ? OR mobile LIKE ?
+      ORDER BY name ASC LIMIT 50
+    `).all(`%${search}%`, `%${search}%`);
+  } else {
+    customers = db.prepare('SELECT * FROM customers ORDER BY name ASC LIMIT 100').all();
+  }
+  return { customers };
+});
+
+server.post('/api/customers', { preHandler: [authenticate] }, async (req: any, reply) => {
+  const { name, mobile, category, whatsapp_opt_out, agent_name, crm_executive } = req.body || {};
+  if (!name) return reply.status(400).send({ error: 'Customer name is required' });
+  const existing = db.prepare('SELECT * FROM customers WHERE name ILIKE ?').get(name) as any;
+  const now = new Date().toISOString();
+  if (existing) {
+    db.prepare(`
+      UPDATE customers SET 
+        mobile = COALESCE(?, mobile),
+        category = COALESCE(?, category),
+        whatsapp_opt_out = COALESCE(?, whatsapp_opt_out),
+        agent_name = COALESCE(?, agent_name),
+        crm_executive = COALESCE(?, crm_executive),
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      mobile || null,
+      category || null,
+      whatsapp_opt_out !== undefined ? (whatsapp_opt_out ? 1 : 0) : null,
+      agent_name || null,
+      crm_executive || null,
+      now,
+      existing.id
+    );
+    return { success: true, customer_id: existing.id };
+  } else {
+    const id = randomUUID();
+    db.prepare(`
+      INSERT INTO customers (id, name, mobile, category, whatsapp_opt_out, agent_name, crm_executive, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, name, mobile || null, category || 'A', whatsapp_opt_out ? 1 : 0, agent_name || null, crm_executive || null, now, now);
+    return { success: true, customer_id: id };
+  }
+});
+
+server.patch('/api/customers/:id/opt-out', { preHandler: [authenticate] }, async (req: any, reply) => {
+  const { opt_out } = req.body || {};
+  const cust = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id) as any;
+  if (!cust) return reply.status(404).send({ error: 'Customer not found' });
+  db.prepare('UPDATE customers SET whatsapp_opt_out = ?, updated_at = ? WHERE id = ?').run(
+    opt_out ? 1 : 0,
+    new Date().toISOString(),
+    req.params.id
+  );
+  return { success: true, whatsapp_opt_out: Boolean(opt_out) };
+});
+
+// Helper for O2C dispatch milestone triggers
+function createCrmActionIfNotExists(
+  flowId: string,
+  actionType: 'DISPATCH_25' | 'DISPATCH_50' | 'DISPATCH_70',
+  assigneeUserId: string,
+  displayNumber: string,
+  percentLabel: string
+) {
+  const existing = db.prepare('SELECT id FROM o2c_crm_actions WHERE flow_id = ? AND action_type = ?').get(flowId, actionType);
+  if (existing) return;
+
+  const actionId = randomUUID();
+  const now = new Date();
+
+  const titleEn = `[${displayNumber}] ${percentLabel} Dispatch Update Notification`;
+  const titleHi = `[${displayNumber}] ${percentLabel} डिस्पैच अपडेट सूचना`;
+
+  const workItemId = WorkItemService.createWorkItem({
+    source_module: 'fms',
+    source_ref_id: flowId,
+    fms_code: 'O2C',
+    step_no: actionType === 'DISPATCH_25' ? 5 : actionType === 'DISPATCH_50' ? 6 : 7,
+    assignee_user_id: assigneeUserId,
+    title_en: titleEn,
+    title_hi: titleHi,
+    is_important: false,
+    available_from: now,
+    planned_at: now,
+  });
+
+  db.prepare(`
+    INSERT INTO o2c_crm_actions (
+      id, flow_id, action_type, assignee_user_id, status, triggered_at, work_item_id
+    ) VALUES (?, ?, ?, ?, 'PENDING', ?, ?)
+  `).run(actionId, flowId, actionType, assigneeUserId, now.toISOString(), workItemId);
+}
+
+// ----------------------------------------------------
+// O2C FMS DISPATCH & CRM ACTION APIs
+// ----------------------------------------------------
+server.post('/api/fms/o2c/add-dispatch', { preHandler: [authenticate] }, async (req: any, reply) => {
   const { flow_id, dispatch_entry } = req.body;
   if (!flow_id || !dispatch_entry) {
     return reply.status(400).send({ error: 'flow_id and dispatch_entry are required' });
@@ -787,12 +999,13 @@ server.post('/api/fms/o2d/add-dispatch', { preHandler: [authenticate] }, async (
     return reply.status(400).send({ error: 'Bill No. is required' });
   }
 
-  // ── Global duplicate bill number check across ALL O2D flows ──
-  const allO2DFlows = db.prepare(
-    "SELECT id, display_number, all_form_data FROM fms_flow_instances WHERE fms_code = 'O2D' AND status != 'DELETED'"
+  // Global duplicate bill number check across ALL O2C flows
+  const allO2CFlows = db.prepare(
+    "SELECT id, display_number, all_form_data FROM fms_flow_instances WHERE fms_code = 'O2C' AND status != 'DELETED'"
   ).all() as any[];
 
-  for (const f of allO2DFlows) {
+  for (const f of allO2CFlows) {
+    if (f.id === flow_id) continue;
     const fData = typeof f.all_form_data === 'string'
       ? JSON.parse(f.all_form_data || '{}')
       : (f.all_form_data || {});
@@ -802,7 +1015,7 @@ server.post('/api/fms/o2d/add-dispatch', { preHandler: [authenticate] }, async (
     );
     if (duplicate) {
       return reply.status(400).send({
-        error: `Bill No. "${billNo}" already exists in order ${f.display_number || f.id}. Duplicate bill numbers are not allowed.`,
+        error: `Bill No. "${billNo}" already exists in order ${f.display_number || f.id}. Duplicate bill numbers are not allowed across orders.`,
       });
     }
   }
@@ -813,12 +1026,23 @@ server.post('/api/fms/o2d/add-dispatch', { preHandler: [authenticate] }, async (
   const allFormData = JSON.parse(flow.all_form_data || '{}');
   const dispatches = Array.isArray(allFormData.dispatches) ? allFormData.dispatches : [];
 
+  const duplicateInSame = dispatches.find(
+    (d: any) => d.bill_no && d.bill_no.trim().toLowerCase() === billNo.toLowerCase()
+  );
+  if (duplicateInSame) {
+    return reply.status(400).send({
+      error: `Bill No. "${billNo}" has already been entered for this order.`,
+    });
+  }
+
   const newEntry = {
     id: randomUUID(),
     bill_no: billNo,
-    customer_verified: dispatch_entry.customer_verified || 'Yes Correct',
+    bill_amount: Number(dispatch_entry.bill_amount) || 0,
     qty_dispatched: Number(dispatch_entry.qty_dispatched) || 0,
-    transport: dispatch_entry.transport || allFormData.transport || '',
+    product_category: dispatch_entry.product_category || 'Top / T-Shirt',
+    cross_check_verified: dispatch_entry.cross_check_verified || 'Yes — Fully Verified',
+    entered_by_accountant: dispatch_entry.entered_by_accountant || req.user.name || 'Accounts',
     created_at: new Date().toISOString(),
     created_by: req.user.name || req.user.id,
   };
@@ -827,10 +1051,12 @@ server.post('/api/fms/o2d/add-dispatch', { preHandler: [authenticate] }, async (
 
   const totalOrdered = Number(allFormData.quantity) || 0;
   const totalDispatched = dispatches.reduce((sum: number, d: any) => sum + (Number(d.qty_dispatched) || 0), 0);
+  const totalBillAmount = dispatches.reduce((sum: number, d: any) => sum + (Number(d.bill_amount) || 0), 0);
   const dispatchPercent = totalOrdered > 0 ? (totalDispatched / totalOrdered) * 100 : 0;
 
   allFormData.dispatches = dispatches;
   allFormData.total_dispatched = totalDispatched;
+  allFormData.total_bill_amount = totalBillAmount;
   allFormData.dispatch_percent = Math.round(dispatchPercent * 10) / 10;
 
   db.prepare('UPDATE fms_flow_instances SET all_form_data = ? WHERE id = ?').run(
@@ -838,18 +1064,31 @@ server.post('/api/fms/o2d/add-dispatch', { preHandler: [authenticate] }, async (
     flow_id
   );
 
+  // Trigger CRM Actions based on order size and % milestones
+  const lalita = db.prepare("SELECT id FROM users WHERE mobile = ? OR name LIKE ?").get('9009200757', '%Lalita%') as any;
+  const lalitaId = lalita ? lalita.id : req.user.id;
+
+  if (totalOrdered >= 900 && dispatchPercent >= 25) {
+    createCrmActionIfNotExists(flow.id, 'DISPATCH_25', lalitaId, flow.display_number, '25%');
+  }
+  if (totalOrdered >= 400 && dispatchPercent >= 50) {
+    createCrmActionIfNotExists(flow.id, 'DISPATCH_50', lalitaId, flow.display_number, '50%');
+  }
+  if (totalOrdered >= 400 && dispatchPercent >= 70) {
+    createCrmActionIfNotExists(flow.id, 'DISPATCH_70', lalitaId, flow.display_number, '70%');
+  }
+
   return {
     success: true,
     total_dispatched: totalDispatched,
+    total_bill_amount: totalBillAmount,
     dispatch_percent: allFormData.dispatch_percent,
     dispatches,
-    auto_advance: allFormData.dispatch_percent > 120,
     can_complete: allFormData.dispatch_percent >= 80,
   };
 });
 
-// Remove a dispatch batch from O2D FMS
-server.post('/api/fms/o2d/remove-dispatch', { preHandler: [authenticate] }, async (req: any, reply) => {
+server.post('/api/fms/o2c/remove-dispatch', { preHandler: [authenticate] }, async (req: any, reply) => {
   const { flow_id, dispatch_id } = req.body;
   if (!flow_id || !dispatch_id) {
     return reply.status(400).send({ error: 'flow_id and dispatch_id are required' });
@@ -865,10 +1104,12 @@ server.post('/api/fms/o2d/remove-dispatch', { preHandler: [authenticate] }, asyn
 
   const totalOrdered = Number(allFormData.quantity) || 0;
   const totalDispatched = dispatches.reduce((sum: number, d: any) => sum + (Number(d.qty_dispatched) || 0), 0);
+  const totalBillAmount = dispatches.reduce((sum: number, d: any) => sum + (Number(d.bill_amount) || 0), 0);
   const dispatchPercent = totalOrdered > 0 ? (totalDispatched / totalOrdered) * 100 : 0;
 
   allFormData.dispatches = dispatches;
   allFormData.total_dispatched = totalDispatched;
+  allFormData.total_bill_amount = totalBillAmount;
   allFormData.dispatch_percent = Math.round(dispatchPercent * 10) / 10;
 
   db.prepare('UPDATE fms_flow_instances SET all_form_data = ? WHERE id = ?').run(
@@ -879,9 +1120,72 @@ server.post('/api/fms/o2d/remove-dispatch', { preHandler: [authenticate] }, asyn
   return {
     success: true,
     total_dispatched: totalDispatched,
+    total_bill_amount: totalBillAmount,
     dispatch_percent: allFormData.dispatch_percent,
     dispatches,
   };
+});
+
+server.get('/api/fms/o2c/crm-actions', { preHandler: [authenticate] }, async (req: any) => {
+  const actions = db.prepare(`
+    SELECT a.*, f.display_number, f.all_form_data
+    FROM o2c_crm_actions a
+    JOIN fms_flow_instances f ON f.id = a.flow_id
+    WHERE a.status = 'PENDING'
+    ORDER BY a.triggered_at DESC
+  `).all() as any[];
+
+  const enriched = actions.map((act) => {
+    const fData = typeof act.all_form_data === 'string'
+      ? JSON.parse(act.all_form_data || '{}')
+      : (act.all_form_data || {});
+    return {
+      ...act,
+      customer_name: fData.customer_name_corrected || fData.customer_name || 'Customer',
+      customer_mobile: fData.customer_mobile || '',
+      agent_name: fData.agent_name || '',
+      transport: fData.transport_name || '',
+      total_quantity: fData.quantity || 0,
+      total_dispatched: fData.total_dispatched || 0,
+      dispatch_percent: fData.dispatch_percent || 0,
+      dispatches: fData.dispatches || [],
+    };
+  });
+
+  return { crm_actions: enriched };
+});
+
+server.get('/api/fms/o2c/crm-actions/count', { preHandler: [authenticate] }, async () => {
+  const row = db.prepare("SELECT COUNT(*) as count FROM o2c_crm_actions WHERE status = 'PENDING'").get() as any;
+  return { count: row?.count || 0 };
+});
+
+server.post('/api/fms/o2c/complete-crm-action', { preHandler: [authenticate] }, async (req: any, reply) => {
+  const { action_id, lr_number, customer_sent, agent_sent } = req.body;
+  if (!action_id) return reply.status(400).send({ error: 'action_id is required' });
+
+  const act = db.prepare('SELECT * FROM o2c_crm_actions WHERE id = ?').get(action_id) as any;
+  if (!act) return reply.status(404).send({ error: 'CRM action not found' });
+
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE o2c_crm_actions SET
+      status = 'DONE',
+      lr_number = COALESCE(?, lr_number),
+      customer_sent = COALESCE(?, customer_sent),
+      agent_sent = COALESCE(?, agent_sent),
+      completed_at = ?
+    WHERE id = ?
+  `).run(lr_number || null, customer_sent ? 1 : 0, agent_sent ? 1 : 0, now, action_id);
+
+  if (act.work_item_id) {
+    WorkItemService.completeWorkItem({
+      work_item_id: act.work_item_id,
+      completed_by: req.user.id,
+    });
+  }
+
+  return { success: true };
 });
 
 server.post('/api/fms/submit-step', { preHandler: [authenticate] }, async (req: any, reply) => {
@@ -895,8 +1199,130 @@ server.post('/api/fms/submit-step', { preHandler: [authenticate] }, async (req: 
   const stepDef = def.steps.find((s) => s.step_no === step_no);
   if (!stepDef) return reply.status(400).send({ error: `Step definition not found: ${step_no}` });
 
+  // ----------------------------------------------------
+  // O2C STEP SPECIFIC VALIDATIONS & HOOKS
+  // ----------------------------------------------------
+  if (flow.fms_code === 'O2C') {
+    // Step 3: VASTRA order number global unique validation
+    if (step_no === 3) {
+      const vastraNo = (form_data.vastra_order_number || '').trim();
+      if (vastraNo) {
+        const allO2C = db.prepare(
+          "SELECT id, display_number, all_form_data FROM fms_flow_instances WHERE fms_code = 'O2C' AND id != ? AND status != 'DELETED'"
+        ).all(flow_id) as any[];
+        for (const f of allO2C) {
+          const fData = typeof f.all_form_data === 'string' ? JSON.parse(f.all_form_data || '{}') : (f.all_form_data || {});
+          if (fData.vastra_order_number && fData.vastra_order_number.trim().toLowerCase() === vastraNo.toLowerCase()) {
+            return reply.status(400).send({
+              error: `VASTRA Order Number "${vastraNo}" already exists in order ${f.display_number || f.id}. Duplicate VASTRA numbers are not allowed.`,
+            });
+          }
+        }
+      }
+    }
+  }
+
   const now = new Date();
   const currentMergedFormData = { ...JSON.parse(flow.all_form_data || '{}'), ...form_data };
+
+  // O2C Step Hooks after merging form data
+  if (flow.fms_code === 'O2C') {
+    // Step 2: Sync customer master & calculate payment terms
+    if (step_no === 2) {
+      const custName = form_data.customer_name_corrected || currentMergedFormData.customer_name || '';
+      const custMobile = form_data.customer_mobile || '';
+      const custCategory = form_data.customer_category ? (form_data.customer_category.includes('B') ? 'B' : form_data.customer_category.includes('C') ? 'C' : 'A') : 'A';
+      
+      if (custName) {
+        const existing = db.prepare('SELECT id FROM customers WHERE name ILIKE ?').get(custName) as any;
+        const nowIso = now.toISOString();
+        if (existing) {
+          db.prepare(`
+            UPDATE customers SET 
+              mobile = COALESCE(?, mobile),
+              category = COALESCE(?, category),
+              agent_name = COALESCE(?, agent_name),
+              crm_executive = COALESCE(?, crm_executive),
+              updated_at = ?
+            WHERE id = ?
+          `).run(custMobile || null, custCategory, form_data.agent_name || null, form_data.crm_executive || null, nowIso, existing.id);
+        } else {
+          db.prepare(`
+            INSERT INTO customers (id, name, mobile, category, agent_name, crm_executive, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(randomUUID(), custName, custMobile || null, custCategory, form_data.agent_name || null, form_data.crm_executive || null, nowIso, nowIso);
+        }
+      }
+
+      if (!form_data.payment_terms_days) {
+        form_data.payment_terms_days = custCategory === 'C' ? 90 : custCategory === 'B' ? 45 : 30;
+        currentMergedFormData.payment_terms_days = form_data.payment_terms_days;
+      }
+    }
+
+    // Step 10: Auto-create Help Slip if problem is reported
+    if (step_no === 10 && form_data.problem_description && form_data.problem_description.trim().length > 0) {
+      const helpSlipId = randomUUID();
+      const custName = currentMergedFormData.customer_name_corrected || currentMergedFormData.customer_name || 'Customer';
+      db.prepare(`
+        INSERT INTO help_slips (id, raised_by, text_content, status, created_at)
+        VALUES (?, ?, ?, 'ASKED', ?)
+      `).run(
+        helpSlipId,
+        req.user.id,
+        `[O2C Quality/Delivery Issue - ${flow.display_number} - ${custName}]: ${form_data.problem_description.trim()}`,
+        now.toISOString()
+      );
+    }
+
+    // Step 11: Auto-calculate Payment Due Date
+    if (step_no === 11) {
+      const termsDays = Number(currentMergedFormData.payment_terms_days) || 30;
+      const step8 = db.prepare('SELECT completed_at FROM fms_step_instances WHERE flow_id = ? AND step_no = 8').get(flow_id) as any;
+      const baseDate = step8?.completed_at ? new Date(step8.completed_at) : now;
+      const dueDate = new Date(baseDate.getTime() + termsDays * 24 * 60 * 60 * 1000);
+      const dueDateFormatted = dueDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+      currentMergedFormData.payment_due_date = dueDateFormatted;
+      currentMergedFormData.payment_due_timestamp = dueDate.toISOString();
+    }
+
+    // Step 16: Auto-escalate to KR (PSDM) if payment not received
+    if (step_no === 16 && form_data.payment_received !== 'Yes — Received in Full') {
+      const krUser = db.prepare('SELECT id FROM users WHERE mobile = ? OR name LIKE ?').get('9827055000', '%KR%') as any;
+      if (krUser) {
+        const custName = currentMergedFormData.customer_name_corrected || currentMergedFormData.customer_name || 'Customer';
+        const billAmt = currentMergedFormData.total_bill_amount || 0;
+        const delegationId = randomUUID();
+        const delegWorkItemId = WorkItemService.createWorkItem({
+          source_module: 'delegation',
+          source_ref_id: delegationId,
+          assignee_user_id: krUser.id,
+          title_en: `[📌 Escalation] O2C Payment Recovery: ${flow.display_number} - ${custName} (₹${billAmt})`,
+          title_hi: `[📌 एस्केलेशन] O2C पेमेंट वसूली: ${flow.display_number} - ${custName} (₹${billAmt})`,
+          is_important: true,
+          available_from: now,
+          planned_at: addWorkingTime(now, 72),
+          task_type: 'DELEGATION',
+        });
+
+        db.prepare(`
+          INSERT INTO delegations (
+            id, created_by, assignee_user_id, title_en, title_hi, tat_hours, is_important,
+            status, work_item_id, deadline_at, deadline_no, is_delegation_task, created_at
+          ) VALUES (?, ?, ?, ?, ?, 72, 1, 'OPEN', ?, ?, 1, 1, ?)
+        `).run(
+          delegationId,
+          req.user.id,
+          krUser.id,
+          `O2C Payment Recovery: ${flow.display_number} - ${custName}`,
+          `O2C पेमेंट वसूली: ${flow.display_number} - ${custName}`,
+          delegWorkItemId,
+          addWorkingTime(now, 72).toISOString(),
+          now.toISOString()
+        );
+      }
+    }
+  }
 
   // Complete work item(s) for this step
   if (work_item_id) {
@@ -934,7 +1360,14 @@ server.post('/api/fms/submit-step', { preHandler: [authenticate] }, async (req: 
     return { success: true, action: 'CLOSE' };
   }
 
-  const nextStepNo = typeof nextAction === 'object' && nextAction.goto_step ? nextAction.goto_step : step_no + 1;
+  let nextStepNo: number;
+  if (typeof nextAction === 'object' && (nextAction as any).goto_step) {
+    nextStepNo = (nextAction as any).goto_step;
+  } else if (flow.fms_code === 'O2C' && step_no === 4) {
+    nextStepNo = 8;
+  } else {
+    nextStepNo = step_no + 1;
+  }
   const nextStepDef = def.steps.find((s) => s.step_no === nextStepNo);
 
   if (!nextStepDef) {
@@ -1809,7 +2242,7 @@ server.put('/api/admin/users/:userId/systems', { preHandler: [authenticate] }, a
   const { userId } = req.params;
   const { systems } = req.body as { systems: string[] };
 
-  const VALID_SYSTEMS = ['CL', 'O2D', 'Purchase'];
+  const VALID_SYSTEMS = ['CL', 'O2C', 'Purchase'];
   const sanitized = (systems || []).filter((s) => VALID_SYSTEMS.includes(s));
 
   // Atomic replace — delete then re-insert
@@ -1937,7 +2370,7 @@ server.get('/api/admin/health', { preHandler: [authenticate] }, async () => {
       total_work_items: workItemCount,
       active_flows: flowCount,
     },
-    database: 'SQLite WAL Mode (Ready for PostgreSQL sync)',
+    database: 'Supabase PostgreSQL 17 (Cloud-Native)',
   };
 });
 
@@ -1949,13 +2382,23 @@ server.get('/api/admin/video-backlog', { preHandler: [authenticate] }, async () 
 // Start Server & Auto-Seed
 const PORT = Number(process.env.PORT) || 3000;
 async function start() {
-  await seedDatabase();
-  startDelegationCron();
+  try {
+    await seedDatabase();
+    startDelegationCron();
+    O2CScheduler.checkAndCreateScheduledTasks();
+    setInterval(() => O2CScheduler.checkAndCreateScheduledTasks(), 30 * 60 * 1000);
+  } catch (err: any) {
+    console.warn('\n⚠️ Database seed skipped on startup:', err.message);
+    if (process.env.DATABASE_URL?.includes('[YOUR-DB-PASSWORD]')) {
+      console.warn('👉 Please update .env with your Supabase database password (DATABASE_URL).\n');
+    }
+  }
+
   try {
     await server.listen({ port: PORT, host: '0.0.0.0' });
-    console.log(`Ketan Aditya Ops API running on http://localhost:${PORT}`);
+    console.log(`🚀 Ketan Aditya Ops API running on http://localhost:${PORT}`);
   } catch (err) {
-    console.error(err);
+    console.error('Failed to start Fastify server:', err);
     process.exit(1);
   }
 }

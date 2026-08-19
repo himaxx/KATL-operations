@@ -1,0 +1,79 @@
+# Implementation Plan: Comprehensive Score Tab & MIS Scoring Engine Refinement
+
+Refine and standardize the MIS Score calculations, API endpoints, and user/owner interfaces across all task types (Daily Checklists, Weekly/Monthly Checklists, FMS steps, Delegations, Compliance tasks) and periods (`Daily`, `Weekly`, `Monthly`, `Quarterly`).
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Scoring Invariants & Rules Enforced**:
+> 1. **Negative Score Display**: $100\% \text{ completion} \rightarrow \mathbf{0\%}$ (Perfect), $80\% \rightarrow \mathbf{-20\%}$, $0\% \rightarrow \mathbf{-100\%}$. If zero tasks are assigned in a period, both scores display $\mathbf{0\%}$.
+> 2. **Task Weights**: Standard tasks = **Weight 1**, Important / Compliance / Delegations = **Weight 3**.
+> 3. **4 Periods Supported**: `Daily` (Today IST), `Weekly` (Monday 00:00 to Saturday 23:59 IST), `Monthly` (Current IST Month), `Quarterly` (Current Indian Financial Year Quarter).
+> 4. **Late Submission from Score Backlog**: Users can submit past uncompleted tasks from the "Not Done" list, marking them as **Done Late** (Work Done earns credit, On-Time does not).
+> 5. **Audit Flags (Flagged FALSE)**: Tasks marked false by the auditor revert to `is_done = false, is_on_time = false` and appear highlighted in pink with auditor details.
+
+---
+
+## Proposed Changes
+
+### 1. Scoring Core Engine
+
+#### [MODIFY] [engine.ts](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/core/scoring/engine.ts)
+- Preserve `sourceModule`, `taskType`, and audit reasons in `DoneItem` and `NotDoneItem` outputs.
+- Ensure future open tasks (whose `planned_at` > `asOfDate`) do not penalize the current score denominator prematurely.
+
+---
+
+### 2. Backend Server & API Endpoints
+
+#### [MODIFY] [index.ts](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/server/index.ts)
+- Add IST helper functions:
+  - `getISTMonthStart()` and `getISTMonthEnd()`
+  - `getISTQuarterRange()` (Indian FY: Q1 Apr-Jun, Q2 Jul-Sep, Q3 Oct-Dec, Q4 Jan-Mar)
+- Update `/api/scores/my`:
+  - Handle `daily`, `weekly`, `monthly`, `quarterly` with proper IST date filters.
+  - Return detailed score result with `doneItems` and `notDoneItems`.
+- Update `/api/scores/team`:
+  - Handle `daily`, `weekly`, `monthly`, `quarterly` for all active team members.
+  - Calculate accurate `weightedDue`, `weightedDone`, `weightedOnTime`, `displayWorkDone`, `displayWorkOnTime`, task counts, and item breakdowns.
+- Ensure `/api/work-items/:id/late-submit` marks tasks `status = 'DONE'`, `completed_at = NOW()`, `is_done = true`, `is_on_time = false`.
+
+---
+
+### 3. Frontend Client Views
+
+#### [MODIFY] [UserScoreView.tsx](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/client/views/user/UserScoreView.tsx)
+- Add 4 period tabs: `Daily`, `Weekly`, `Monthly`, `Quarterly`.
+- Display Work Done and Work On Time cards with `-XX%` formatting, weight breakdown (`X/Y wt`), and task counters (`X done / Y total`).
+- "Done" list with timestamp and "✓ On time" vs "⚠ Late" badges.
+- "Not Done" backlog with:
+  - Task type tag (`REPETITIVE`, `FMS`, `DELEGATION`, `COMPLIANCE`)
+  - Important 3x badge
+  - "Flagged FALSE" pink badge with auditor name
+  - "Submit" button allowing instant late-submission.
+
+#### [MODIFY] [OwnerScoreView.tsx](file:///c:/Users/admin/Desktop/Website/KATL-operations/src/client/views/owner/OwnerScoreView.tsx)
+- Add 4 period tabs: `Daily`, `Weekly`, `Monthly`, `Quarterly`.
+- Company-wide summary metric card (Total Tasks, Done, On-Time, Completion %).
+- Staff search bar (by name or mobile).
+- CSV / Excel Export with comprehensive report columns.
+- Expandable staff cards showing individual Work Done %, Work On Time %, progress bar, and drill-down task lists.
+
+---
+
+## Verification Plan
+
+### Automated / Backend Verification
+- Run tests verifying score calculation across different combinations of normal, delegation, and compliance tasks.
+- Verify IST date boundary computations for `daily`, `weekly`, `monthly`, and `quarterly`.
+- Test `/api/scores/my` and `/api/scores/team` across all 4 periods.
+
+### Manual UI Verification
+1. Log in as a regular user:
+   - Check Score tab with `Daily`, `Weekly`, `Monthly`, `Quarterly` tabs.
+   - Verify score numbers change dynamically upon completing or late-submitting tasks.
+   - Click "Submit" on a "Not Done" task $\rightarrow$ verify it transitions to Done (Late) and updates score.
+2. Log in as Owner / Mandate Holder:
+   - Check Score tab for all staff members across `Daily`, `Weekly`, `Monthly`, `Quarterly`.
+   - Test search filter by staff name.
+   - Click "Export CSV" $\rightarrow$ verify generated CSV contains complete team score report.

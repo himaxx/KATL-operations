@@ -1,7 +1,7 @@
 import { db, initDatabase } from './db';
 import bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
-import { WorkItemService } from './services/workItemService';
+import { WorkItemService, getMondayOfWeekIST } from './services/workItemService';
 import { addWorkingTime, createDateFromIST, getISTComponents } from '../core/working-time/engine';
 import { formatFmsDisplayNumber } from '../fms/_framework/numbering';
 
@@ -407,8 +407,8 @@ export const ALL_DAILY_TASKS: UserTaskSpec[] = [
     contact: '9009200757',
     department: 'MDO',
     designation: 'CRM',
-    taskEn: 'Order entry in O2D FMS',
-    taskHi: 'O2D एफएमएस में ऑर्डर एंट्री दर्ज करना',
+    taskEn: 'Order entry in O2C FMS',
+    taskHi: 'O2C एफएमएस में ऑर्डर एंट्री दर्ज करना',
     frequency: 'D',
     isImportant: true,
   },
@@ -429,8 +429,8 @@ export const ALL_DAILY_TASKS: UserTaskSpec[] = [
     contact: '9876543210',
     department: 'MDO',
     designation: 'Process Cordinator',
-    taskEn: 'Check O2D & Purchase FMS me delay work ka follow up lena and reminder with call',
-    taskHi: 'O2D एवं परचेज एफएमएस में लेट काम का कॉल द्वारा फॉलो-अप',
+    taskEn: 'Check O2C & Purchase FMS me delay work ka follow up lena and reminder with call',
+    taskHi: 'O2C एवं परचेज एफएमएस में लेट काम का कॉल द्वारा फॉलो-अप',
     frequency: 'D',
     isImportant: true,
   },
@@ -697,10 +697,83 @@ export const ALL_DAILY_TASKS: UserTaskSpec[] = [
   },
 ];
 
+export function ensureDailyWorkItemsForToday() {
+  const nowIST = getISTComponents(new Date());
+  const todayAvailableFrom = createDateFromIST(nowIST.year, nowIST.month, nowIST.date, 10, 0, 0);
+  const todayPlannedAt = createDateFromIST(nowIST.year, nowIST.month, nowIST.date, 20, 0, 0); // 8:00 PM IST
+  const nowIso = new Date().toISOString();
+  const weekStartDate = getMondayOfWeekIST(todayPlannedAt);
+
+  console.log(`Checking daily repetitive tasks for today (${nowIST.dateStr})...`);
+
+  try {
+    const batchSql = `
+      WITH inserted_items AS (
+        INSERT INTO work_items (
+          id, source_module, source_ref_id, assignee_user_id,
+          title_en, title_hi, is_important, available_from, planned_at,
+          status, created_at, task_type
+        )
+        SELECT 
+          ('wi-cl-' || cd.id || '-' || to_char($1::timestamptz AT TIME ZONE 'Asia/Kolkata', 'YYYY-MM-DD')) AS id,
+          'checklist',
+          cd.id,
+          cd.target_id,
+          cd.title_en,
+          cd.title_hi,
+          cd.is_important,
+          $2::timestamptz,
+          $1::timestamptz,
+          'OPEN',
+          $3::timestamptz,
+          'REPETITIVE'
+        FROM checklist_definitions cd
+        WHERE cd.is_active = TRUE 
+          AND cd.frequency = 'DAILY'
+          AND cd.target_type = 'USER'
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id, assignee_user_id, is_important, created_at
+      )
+      INSERT INTO score_events (id, user_id, work_item_id, week_start_date, weight, is_done, is_on_time, updated_at)
+      SELECT 
+        ('se-' || ii.id),
+        ii.assignee_user_id,
+        ii.id,
+        $4,
+        CASE WHEN ii.is_important THEN 3 ELSE 1 END,
+        FALSE,
+        FALSE,
+        ii.created_at
+      FROM inserted_items ii
+      ON CONFLICT (work_item_id) DO NOTHING;
+    `;
+
+    db.prepare(batchSql).run(
+      todayPlannedAt.toISOString(),
+      todayAvailableFrom.toISOString(),
+      nowIso,
+      weekStartDate
+    );
+
+    console.log(`✅ Daily repetitive tasks verified/generated for today (${nowIST.dateStr}).`);
+  } catch (err: any) {
+    console.error('Error generating daily repetitive tasks:', err.message);
+  }
+}
+
 export async function seedDatabase() {
   initDatabase();
 
-  console.log('Seeding database for Ketan Aditya Ops...');
+  const userCount = Number((db.prepare('SELECT count(*) as cnt FROM users').get() as any)?.cnt || 0);
+  const checklistDefCount = Number((db.prepare('SELECT count(*) as cnt FROM checklist_definitions').get() as any)?.cnt || 0);
+
+  if (userCount >= 28 && checklistDefCount >= 100) {
+    console.log(`✅ Supabase Database ready (${userCount} staff users, ${checklistDefCount} checklist definitions).`);
+    ensureDailyWorkItemsForToday();
+    return;
+  }
+
+  console.log('Seeding Supabase database for Ketan Aditya Ops...');
 
   const passwordHashOwner = await bcrypt.hash('Hello@Ketan', 10);
   const passwordHashMandate = await bcrypt.hash('MIS@Ketan', 10);
@@ -711,7 +784,7 @@ export async function seedDatabase() {
   const insertUser = db.prepare(`
     INSERT OR IGNORE INTO users (
       id, name, mobile, email, pin_hash, password_hash, role, is_active, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, ?)
   `);
 
   insertUser.run('user-owner', 'Owner (Ketan Aditya)', '9999900000', 'hello@ketan', defaultPinHash, passwordHashOwner, 'OWNER', now);
@@ -814,11 +887,23 @@ export async function seedDatabase() {
   }
 
   // 4b. Seed User Systems from CSV (Process Involvement column)
-  // System codes: CL = Checklist, O2D = Order to Delivery, Purchase = Purchase FMS
+  // System codes: CL = Checklist, O2C = Order to Collection, Purchase = Purchase FMS
   const insertUserSystem = db.prepare('INSERT OR IGNORE INTO user_systems (user_id, system_code) VALUES (?, ?)');
 
-  // Users with O2D access (in addition to CL)
-  const o2dUsers = ['7771002882', '9009200757', '8109014198', '6267888249']; // Akash Soni, Lalita Yadav, KR, Himanshu Gurjar
+  // Users with O2C access (in addition to CL)
+  const o2cUsers = [
+    '9009200757', // Lalita Yadav (CRM)
+    '9165072008', // Harsh Malakar (MIS / VASTRA)
+    '7771002882', // Akash Soni (Accounts)
+    '7879883549', // Sanjay Malakar (Accounts)
+    '7024628005', // Sanjay Malakar
+    '7771000411', // Manoj Bhaiya (Warehouse / Dispatch)
+    '9685002014', // Manoj Bhaiya
+    '8109014198', // KR (Problem Solver / PSDM)
+    '9827055000', // KR
+    '6267888249', // Himanshu Gurjar
+    '8839364733', // Sapna Sahu
+  ];
   // Users with Purchase access (in addition to CL)
   const purchaseUsers = ['8109014198', '7771000411', '7879883549', '9399906456', '8839364733']; // KR, Manoj Bhaiya, Sanjay Malakar, Santosh Rajput, Sapna Sahu
 
@@ -826,8 +911,8 @@ export async function seedDatabase() {
     const uid = `user-${staff.contact}`;
     // Everyone gets CL
     insertUserSystem.run(uid, 'CL');
-    if (o2dUsers.includes(staff.contact)) {
-      insertUserSystem.run(uid, 'O2D');
+    if (o2cUsers.includes(staff.contact)) {
+      insertUserSystem.run(uid, 'O2C');
     }
     if (purchaseUsers.includes(staff.contact)) {
       insertUserSystem.run(uid, 'Purchase');
@@ -835,10 +920,10 @@ export async function seedDatabase() {
   }
   // Owner and Mandate Holder get all systems
   insertUserSystem.run('user-owner', 'CL');
-  insertUserSystem.run('user-owner', 'O2D');
+  insertUserSystem.run('user-owner', 'O2C');
   insertUserSystem.run('user-owner', 'Purchase');
   insertUserSystem.run('user-mandate', 'CL');
-  insertUserSystem.run('user-mandate', 'O2D');
+  insertUserSystem.run('user-mandate', 'O2C');
   insertUserSystem.run('user-mandate', 'Purchase');
 
 
@@ -987,7 +1072,7 @@ export async function seedDatabase() {
   const insertChecklistDef = db.prepare(`
     INSERT OR REPLACE INTO checklist_definitions (
       id, title_en, title_hi, target_type, target_id, frequency, start_date, due_time, is_important, video_url, is_active, created_at
-    ) VALUES (?, ?, ?, 'USER', ?, 'DAILY', '2026-08-01', '20:00', ?, null, 1, ?)
+    ) VALUES (?, ?, ?, 'USER', ?, 'DAILY', '2026-08-01', '20:00', ?, null, TRUE, ?)
   `);
 
   // Target today's working window in IST: available_from 10:00 AM IST, planned_at 8:00 PM (20:00 IST)
@@ -1007,7 +1092,7 @@ export async function seedDatabase() {
       task.taskEn,
       task.taskHi,
       userId,
-      task.isImportant ? 1 : 0,
+      Boolean(task.isImportant),
       now
     );
 

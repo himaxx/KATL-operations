@@ -13,6 +13,8 @@ export interface ScoreItemInput {
   status: 'OPEN' | 'DONE' | 'MISSED' | 'FLAGGED_FALSE';
   titleEn: string;
   titleHi: string;
+  sourceModule?: string;
+  taskType?: string;
   flaggedFalseBy?: string | null;
   flaggedFalseReason?: string | null;
 }
@@ -25,6 +27,8 @@ export interface DoneItem {
   completedAt: Date;
   isOnTime: boolean;
   isImportant: boolean;
+  sourceModule?: string;
+  taskType?: string;
 }
 
 export interface NotDoneItem {
@@ -36,6 +40,9 @@ export interface NotDoneItem {
   isImportant: boolean;
   isFlaggedFalse: boolean;
   checkedByName?: string | null;
+  flaggedReason?: string | null;
+  sourceModule?: string;
+  taskType?: string;
 }
 
 export interface PeriodScoreResult {
@@ -90,15 +97,6 @@ export function calculateMISScore(
 
   for (const item of items) {
     const plannedTime = new Date(item.plannedAt).getTime();
-    const asOfTime = asOfDate.getTime();
-
-    // If item is not completed and its planned time is still in the future,
-    // it does NOT count towards current period's due weight yet.
-    const isCompleted = item.status === 'DONE' && !!item.completedAt;
-    if (!isCompleted && plannedTime > asOfTime) {
-      continue;
-    }
-
     const weight = item.isImportant ? 3 : 1;
     weightedDue += weight;
 
@@ -119,6 +117,8 @@ export function calculateMISScore(
         completedAt: item.completedAt,
         isOnTime,
         isImportant: item.isImportant,
+        sourceModule: item.sourceModule,
+        taskType: item.taskType,
       });
     } else {
       // Item is not done or flagged false
@@ -131,6 +131,9 @@ export function calculateMISScore(
         isImportant: item.isImportant,
         isFlaggedFalse: item.status === 'FLAGGED_FALSE',
         checkedByName: item.flaggedFalseBy,
+        flaggedReason: item.flaggedFalseReason,
+        sourceModule: item.sourceModule,
+        taskType: item.taskType,
       });
     }
   }

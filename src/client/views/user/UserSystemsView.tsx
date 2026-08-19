@@ -7,11 +7,12 @@ import { AuditSamplerView } from '../capabilities/AuditSamplerView';
 import { DelegationView } from '../capabilities/DelegationView';
 import { VideoBacklogView } from '../capabilities/VideoBacklogView';
 import { PurchaseFmsView } from './PurchaseFmsView';
-import { O2DFmsView } from './O2DFmsView';
+import { O2CFmsView } from './O2CFmsView';
 
 // Maps system_code (from user_systems table) → FMS definition codes shown to user
 const SYSTEM_TO_FMS_CODES: Record<string, string[]> = {
-  O2D: ['O2D'],
+  O2C: ['O2C'],
+  O2D: ['O2C'], // legacy mapping
   Purchase: ['PUR'],
   // CL (Checklist) is managed under the Tasks/Home tab, not the FMS Flowchart section
 };
@@ -92,8 +93,8 @@ export const UserSystemsView: React.FC = () => {
     return <PurchaseFmsView onBack={() => setActiveFmsCode(null)} />;
   }
 
-  if (activeFmsCode === 'O2D') {
-    return <O2DFmsView onBack={() => setActiveFmsCode(null)} />;
+  if (activeFmsCode === 'O2C' || activeFmsCode === 'O2D') {
+    return <O2CFmsView onBack={() => setActiveFmsCode(null)} />;
   }
 
   const userCapabilities = user.capabilities || [];
@@ -101,9 +102,25 @@ export const UserSystemsView: React.FC = () => {
 
   // Compute allowed FMS codes based on assigned systems
   const allowedFmsCodes = new Set<string>();
+
+  // Owners & Mandate holders get all systems
+  if (user.role === 'OWNER' || user.role === 'MANDATE_HOLDER') {
+    allowedFmsCodes.add('O2C');
+    allowedFmsCodes.add('PUR');
+  }
+
+  // Core O2C team members (Lalita, Harsh, Akash, Sanjay, Manoj, KR, Himanshu)
+  const o2cMobiles = ['9009200757', '9165072008', '7771002882', '7879883549', '7024628005', '7771000411', '9685002014', '8109014198', '9827055000', '6267888249'];
+  if ((user.mobile && o2cMobiles.includes(user.mobile)) || user.designations?.some((d: any) => typeof d === 'string' ? d === 'CRM' : d.name === 'CRM')) {
+    allowedFmsCodes.add('O2C');
+  }
+
   for (const sysCode of userSystems) {
     const fmsCodes = SYSTEM_TO_FMS_CODES[sysCode] || [];
     fmsCodes.forEach((c) => allowedFmsCodes.add(c));
+    if (sysCode.toUpperCase().includes('O2C') || sysCode.toUpperCase().includes('O2D')) {
+      allowedFmsCodes.add('O2C');
+    }
   }
 
   // Filter FMS definitions to only what the user has access to

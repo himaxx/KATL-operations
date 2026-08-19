@@ -19,6 +19,8 @@ import {
   Layers,
 } from 'lucide-react';
 import { WorkItem } from './UniversalWorkCard';
+import { WhatsAppButton } from '../fms/WhatsAppButton';
+import { whatsappTemplates } from '../../../fms';
 
 interface WorkModalProps {
   item: WorkItem | null;
@@ -46,15 +48,18 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
   const [newAgentPhone, setNewAgentPhone] = useState('');
   const [addingMaster, setAddingMaster] = useState(false);
 
-  // O2D Step 2 Local Dispatch States
-  const [o2dBillNo, setO2dBillNo] = useState('');
-  const [o2dCustomerVerified, setO2dCustomerVerified] = useState('Yes Correct');
-  const [o2dQtyDispatched, setO2dQtyDispatched] = useState('');
-  const [o2dTransport, setO2dTransport] = useState('');
-  const [o2dDispatches, setO2dDispatches] = useState<any[]>([]);
-  const [o2dTotalDispatched, setO2dTotalDispatched] = useState<number>(0);
-  const [o2dPercent, setO2dPercent] = useState<number>(0);
-  const [o2dSavingBatch, setO2dSavingBatch] = useState(false);
+  // O2C Step 4 Dispatch Batch States
+  const [o2cBillNo, setO2cBillNo] = useState('');
+  const [o2cBillAmount, setO2cBillAmount] = useState('');
+  const [o2cQtyDispatched, setO2cQtyDispatched] = useState('');
+  const [o2cProductCategory, setO2cProductCategory] = useState('Top / T-Shirt');
+  const [o2cTransport, setO2cTransport] = useState('');
+  const [o2cCrossCheckVerified, setO2cCrossCheckVerified] = useState('Yes — Fully Verified');
+  const [o2cDispatches, setO2cDispatches] = useState<any[]>([]);
+  const [o2cTotalDispatched, setO2cTotalDispatched] = useState<number>(0);
+  const [o2cTotalBillAmount, setO2cTotalBillAmount] = useState<number>(0);
+  const [o2cPercent, setO2cPercent] = useState<number>(0);
+  const [o2cSavingBatch, setO2cSavingBatch] = useState(false);
 
   const fetchMasterData = async () => {
     try {
@@ -74,10 +79,12 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
     setError(null);
     setFormData({});
     setNotes('');
-    setO2dBillNo('');
-    setO2dCustomerVerified('Yes Correct');
-    setO2dQtyDispatched('');
-    setO2dTransport('');
+    setO2cBillNo('');
+    setO2cBillAmount('');
+    setO2cQtyDispatched('');
+    setO2cProductCategory('Top / T-Shirt');
+    setO2cTransport('');
+    setO2cCrossCheckVerified('Yes — Fully Verified');
 
     // Mark first opened in backend for bottleneck analysis
     fetch(`/api/work-items/${item.id}/open`, {
@@ -102,23 +109,19 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
           const def = defsData.definitions?.find((d: any) => d.code === item.fms_code);
           setFmsDef(def);
 
-          // If O2D flow, init dispatches
+          // Initialize O2C dispatches
           if (flow?.all_form_data) {
             const disps = Array.isArray(flow.all_form_data.dispatches) ? flow.all_form_data.dispatches : [];
-            setO2dDispatches(disps);
+            setO2cDispatches(disps);
             const totalDispatched = Number(flow.all_form_data.total_dispatched) || 0;
+            const totalBill = Number(flow.all_form_data.total_bill_amount) || 0;
             const totalOrdered = Number(flow.all_form_data.quantity) || 0;
-            setO2dTotalDispatched(totalDispatched);
-            setO2dPercent(totalOrdered > 0 ? (totalDispatched / totalOrdered) * 100 : 0);
-            if (flow.all_form_data.transport && !o2dTransport) {
-              setO2dTransport(flow.all_form_data.transport);
+            setO2cTotalDispatched(totalDispatched);
+            setO2cTotalBillAmount(totalBill);
+            setO2cPercent(totalOrdered > 0 ? (totalDispatched / totalOrdered) * 100 : 0);
+            if (flow.all_form_data.transport_name && !o2cTransport) {
+              setO2cTransport(flow.all_form_data.transport_name);
             }
-          }
-          if (item.fms_code === 'O2D' && item.step_no === 3) {
-            setFormData({
-              order_80_percent_dispatched: 'Yes / Haan',
-              confirmed_by_name: user?.name || '',
-            });
           }
         })
         .finally(() => setLoading(false));
@@ -159,7 +162,7 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
 
       await fetchMasterData();
       if (addListKey === 'transports') {
-        setO2dTransport(newItemValue.trim());
+        setO2cTransport(newItemValue.trim());
       } else {
         setFormData({ ...formData, [addListKey === 'agents' ? 'agent_name' : 'fabric_name']: newItemValue.trim() });
       }
@@ -193,9 +196,11 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
     const cleanPhone = rawPhone.replace(/[^0-9]/g, '');
     const phoneWithCode = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
     const poNumber = fmsFlow?.display_number || 'PO';
-    const fabricName = fmsFlow?.all_form_data?.fabric_name || 'Fabric';
+    const fabricName = fmsFlow?.all_form_data?.fabric_name || 'Fabric Quality';
+    const agentName = fmsFlow?.all_form_data?.agent_name || 'Partner';
+    const todayDate = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 
-    const message = `Hey, this is the PO number : ${poNumber} of ${fabricName}`;
+    const message = `🏢 *Ketan Aditya Textiles LLP*\n\nDear ${agentName},\n\nPlease find our Purchase Order details below for processing:\n\n📄 *PO Number:* ${poNumber}\n🧵 *Fabric Quality:* ${fabricName}\n📅 *Date:* ${todayDate}\n\nKindly include the PO Number in the receipt.\n\nBest regards,\n*Purchase Team | Ketan Aditya*`;
     const url = phoneWithCode
       ? `https://wa.me/${phoneWithCode}?text=${encodeURIComponent(message)}`
       : `https://wa.me/?text=${encodeURIComponent(message)}`;
@@ -203,22 +208,37 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
     window.open(url, '_blank');
   };
 
-  // O2D Step 2: Save Dispatch Entry Batch
-  const handleSaveO2DDispatchBatch = async (isMarkingComplete: boolean = false) => {
+  // O2C Step 4: Save Dispatch Entry Batch
+  const handleSaveO2CDispatchBatch = async (isMarkingComplete: boolean = false) => {
     setError(null);
-    if (!isMarkingComplete && (!o2dBillNo.trim() || !o2dQtyDispatched || Number(o2dQtyDispatched) <= 0)) {
-      setError('Please enter a valid Bill No. and Dispatch Quantity (Pcs)');
+    if (!isMarkingComplete && (!o2cBillNo.trim() || !o2cBillAmount || Number(o2cBillAmount) <= 0 || !o2cQtyDispatched || Number(o2cQtyDispatched) <= 0)) {
+      setError('Please enter a valid Bill No., Bill Amount (₹), and Dispatch Quantity (Pcs)');
       return;
     }
 
-    setO2dSavingBatch(true);
-    try {
-      let updatedTotal = o2dTotalDispatched;
-      let updatedPercent = o2dPercent;
-      let updatedDispatches = [...o2dDispatches];
+    const totalOrdered = Number(fmsFlow?.all_form_data?.quantity) || 0;
+    const newQty = Number(o2cQtyDispatched) || 0;
 
-      if (o2dBillNo.trim() && Number(o2dQtyDispatched) > 0) {
-        const res = await fetch('/api/fms/o2d/add-dispatch', {
+    // Warn user if new dispatch quantity causes total dispatched to exceed order quantity
+    if (!isMarkingComplete && totalOrdered > 0 && (o2cTotalDispatched + newQty > totalOrdered)) {
+      const excess = (o2cTotalDispatched + newQty) - totalOrdered;
+      const confirmExcess = window.confirm(
+        `⚠️ Warning: Total Dispatched Quantity (${o2cTotalDispatched + newQty} Pcs) will exceed Total Order Quantity (${totalOrdered} Pcs) by ${excess} Pcs.\n\nDo you want to proceed with this entry?`
+      );
+      if (!confirmExcess) {
+        return;
+      }
+    }
+
+    setO2cSavingBatch(true);
+    try {
+      let updatedTotal = o2cTotalDispatched;
+      let updatedBillTotal = o2cTotalBillAmount;
+      let updatedPercent = o2cPercent;
+      let updatedDispatches = [...o2cDispatches];
+
+      if (o2cBillNo.trim() && Number(o2cQtyDispatched) > 0) {
+        const res = await fetch('/api/fms/o2c/add-dispatch', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -227,10 +247,13 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
           body: JSON.stringify({
             flow_id: item.source_ref_id,
             dispatch_entry: {
-              bill_no: o2dBillNo.trim(),
-              customer_verified: o2dCustomerVerified,
-              qty_dispatched: Number(o2dQtyDispatched),
-              transport: o2dTransport || fmsFlow?.all_form_data?.transport || '',
+              bill_no: o2cBillNo.trim(),
+              bill_amount: Number(o2cBillAmount) || 0,
+              qty_dispatched: Number(o2cQtyDispatched),
+              product_category: o2cProductCategory,
+              cross_check_verified: o2cCrossCheckVerified,
+              transport: o2cTransport || fmsFlow?.all_form_data?.transport_name || '',
+              entered_by_accountant: user?.name || 'Accounts',
             },
           }),
         });
@@ -239,49 +262,47 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
         if (!res.ok) throw new Error(data.error || 'Failed to save dispatch');
 
         updatedTotal = data.total_dispatched;
+        updatedBillTotal = data.total_bill_amount;
         updatedPercent = data.dispatch_percent;
         updatedDispatches = data.dispatches;
 
-        setO2dTotalDispatched(updatedTotal);
-        setO2dPercent(updatedPercent);
-        setO2dDispatches(updatedDispatches);
+        setO2cTotalDispatched(updatedTotal);
+        setO2cTotalBillAmount(updatedBillTotal);
+        setO2cPercent(updatedPercent);
+        setO2cDispatches(updatedDispatches);
 
         // Reset batch input fields
-        setO2dBillNo('');
-        setO2dQtyDispatched('');
-
-        // If auto-advance threshold (>120%) exceeded
-        if (data.auto_advance) {
-          await handleSubmitStepDirect({
-            total_dispatched: updatedTotal,
-            dispatch_percent: updatedPercent,
-            auto_closed_due_to_threshold: true,
-          });
-          return;
-        }
+        setO2cBillNo('');
+        setO2cBillAmount('');
+        setO2cQtyDispatched('');
       }
 
       if (isMarkingComplete) {
+        if (updatedPercent < 80) {
+          throw new Error(`Cannot complete order: Current dispatch is ${Math.round(updatedPercent)}%. Minimum 80% is required to complete.`);
+        }
         await handleSubmitStepDirect({
           total_dispatched: updatedTotal,
+          total_bill_amount: updatedBillTotal,
           dispatch_percent: updatedPercent,
           completed_by_user: true,
+          dispatches: updatedDispatches,
         });
         return;
       }
 
-      // If just saving a batch (< 80%), close modal or notify success
+      // Refresh parent data silently without closing modal or marking work item DONE
       onSuccess();
     } catch (err: any) {
       setError(err.message || 'Error saving dispatch');
     } finally {
-      setO2dSavingBatch(false);
+      setO2cSavingBatch(false);
     }
   };
 
-  const handleRemoveO2DDispatchBatch = async (dispatchId: string) => {
+  const handleRemoveO2CDispatchBatch = async (dispatchId: string) => {
     try {
-      const res = await fetch('/api/fms/o2d/remove-dispatch', {
+      const res = await fetch('/api/fms/o2c/remove-dispatch', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -295,9 +316,10 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to remove batch');
 
-      setO2dTotalDispatched(data.total_dispatched);
-      setO2dPercent(data.dispatch_percent);
-      setO2dDispatches(data.dispatches);
+      setO2cTotalDispatched(data.total_dispatched);
+      setO2cTotalBillAmount(data.total_bill_amount);
+      setO2cPercent(data.dispatch_percent);
+      setO2cDispatches(data.dispatches);
       onSuccess();
     } catch (err: any) {
       setError(err.message || 'Error removing batch');
@@ -386,8 +408,7 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
     }
   };
 
-  const isO2DStep2 = item.source_module === 'fms' && item.fms_code === 'O2D' && item.step_no === 2;
-  const isO2DStep3 = item.source_module === 'fms' && item.fms_code === 'O2D' && item.step_no === 3;
+  const isO2CStep4 = item.source_module === 'fms' && item.fms_code === 'O2C' && item.step_no === 4;
   const isPurStep3 = item.source_module === 'fms' && item.fms_code === 'PUR' && item.step_no === 3;
 
   return (
@@ -480,56 +501,69 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
           )}
 
           {/* ========================================================================= */}
-          {/* O2D STEP 2 CUSTOM UI: Akash Soni Multi-Dispatch Staggered Batch Entry */}
+          {/* O2C STEP 4 CUSTOM UI: Akash Soni / Accounts Multi-Dispatch Staggered Batch Entry */}
           {/* ========================================================================= */}
-          {isO2DStep2 && (
+          {isO2CStep4 && (
             <div className="space-y-4">
-              {/* Live Dispatch Progress Bar */}
-              <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-2xl space-y-2">
+              {/* Live Dispatch Progress Bar & Value Card */}
+              <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-2xl space-y-2.5 shadow-2xs">
                 <div className="flex items-center justify-between text-xs font-extrabold text-navy-900">
                   <span className="flex items-center gap-1.5">
                     <Truck className="w-4 h-4 text-amber-600" />
                     Dispatch Progress
                   </span>
-                  <span className={o2dPercent >= 80 ? 'text-emerald-700' : 'text-amber-700'}>
-                    {o2dTotalDispatched} / {Number(fmsFlow?.all_form_data?.quantity) || 0} Pcs ({Math.round(o2dPercent)}%)
+                  <span className={o2cPercent >= 80 ? 'text-emerald-700 font-black' : 'text-amber-700 font-bold'}>
+                    {o2cTotalDispatched} / {Number(fmsFlow?.all_form_data?.quantity) || 0} Pcs ({Math.round(o2cPercent)}%)
                   </span>
                 </div>
+
                 <div className="w-full h-3 bg-amber-200/50 rounded-full overflow-hidden">
                   <div
                     className={`h-full transition-all duration-300 ${
-                      o2dPercent >= 100
+                      o2cPercent >= 100
                         ? 'bg-emerald-500'
-                        : o2dPercent >= 80
+                        : o2cPercent >= 80
                         ? 'bg-emerald-400'
                         : 'bg-pink-brand'
                     }`}
-                    style={{ width: `${Math.min(100, o2dPercent)}%` }}
+                    style={{ width: `${Math.min(100, o2cPercent)}%` }}
                   />
                 </div>
-                {o2dPercent >= 80 && (
-                  <p className="text-[11px] font-bold text-emerald-700">
-                    ✓ Threshold reached (&ge; 80%). You can now mark dispatch completed or log additional batches.
+
+                <div className="flex items-center justify-between text-[11px] pt-1 text-slate-600 border-t border-amber-200/60">
+                  <span>
+                    Total Dispatched Value: <strong className="text-navy-900 font-black">₹{o2cTotalBillAmount.toLocaleString('en-IN')}</strong>
+                  </span>
+                  <span>
+                    Logged: <strong className="text-navy-900 font-bold">{o2cDispatches.length} Batches</strong>
+                  </span>
+                </div>
+
+                {o2cPercent >= 80 && (
+                  <p className="text-[11px] font-bold text-emerald-700 bg-emerald-100/60 p-2 rounded-xl border border-emerald-200">
+                    ✓ Threshold reached (&ge; 80%). You can log additional batches or click <strong>&quot;Complete Dispatch Step (&ge; 80%) ✓&quot;</strong> below to advance to Warehouse check.
                   </p>
                 )}
               </div>
 
               {/* Existing Dispatch Batches Log */}
-              {o2dDispatches.length > 0 && (
+              {o2cDispatches.length > 0 && (
                 <div>
                   <h4 className="text-xs font-black text-navy-900 uppercase tracking-wider mb-2">
-                    Logged Dispatch Batches ({o2dDispatches.length})
+                    Logged Dispatch Batches ({o2cDispatches.length})
                   </h4>
-                  <div className="space-y-2 max-h-36 overflow-y-auto">
-                    {o2dDispatches.map((d: any, idx: number) => (
+                  <div className="space-y-2 max-h-44 overflow-y-auto">
+                    {o2cDispatches.map((d: any, idx: number) => (
                       <div
                         key={d.id || idx}
-                        className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs flex items-center justify-between gap-2"
+                        className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs flex items-center justify-between gap-2 shadow-2xs"
                       >
                         <div className="flex-1 min-w-0">
-                          <p className="font-bold text-navy-900 truncate">Bill: {d.bill_no}</p>
-                          <p className="text-[10px] text-slate-400">
-                            {new Date(d.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {d.transport || 'Transport'}
+                          <p className="font-bold text-navy-900 truncate">
+                            Bill No: <span className="text-pink-brand">{d.bill_no}</span> • ₹{Number(d.bill_amount || 0).toLocaleString('en-IN')}
+                          </p>
+                          <p className="text-[10px] text-slate-400 mt-0.5">
+                            {d.product_category || 'Goods'} • {d.transport || 'Transport'} • {new Date(d.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </p>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
@@ -539,7 +573,7 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
                           <button
                             type="button"
                             title="Remove Batch"
-                            onClick={() => handleRemoveO2DDispatchBatch(d.id)}
+                            onClick={() => handleRemoveO2CDispatchBatch(d.id)}
                             className="w-7 h-7 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-600 flex items-center justify-center transition"
                           >
                             <X className="w-3.5 h-3.5" />
@@ -557,28 +591,31 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
                   + Enter New Dispatch Batch
                 </h4>
 
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-700">Bill No. / Challan No. *</label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. BILL-4402"
-                    value={o2dBillNo}
-                    onChange={(e) => setO2dBillNo(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
-                  />
-                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-700">Bill No. / Challan No. *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. BILL-4402"
+                      value={o2cBillNo}
+                      onChange={(e) => setO2cBillNo(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
+                    />
+                  </div>
 
-                <div className="space-y-1">
-                  <label className="text-xs font-bold text-slate-700">Customer Name Cross-Check *</label>
-                  <select
-                    value={o2dCustomerVerified}
-                    onChange={(e) => setO2dCustomerVerified(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
-                  >
-                    <option value="Yes Correct">Yes Correct (नाम सही है)</option>
-                    <option value="No Not Match">No Not Match (नाम मेल नहीं खाता)</option>
-                  </select>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-slate-700">Bill Amount (₹) *</label>
+                    <input
+                      type="number"
+                      min="1"
+                      required
+                      placeholder="e.g. 85000"
+                      value={o2cBillAmount}
+                      onChange={(e) => setO2cBillAmount(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
+                    />
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-2">
@@ -587,39 +624,69 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
                     <input
                       type="number"
                       min="1"
-                      placeholder="e.g. 200"
-                      value={o2dQtyDispatched}
-                      onChange={(e) => setO2dQtyDispatched(e.target.value)}
+                      placeholder="e.g. 250"
+                      value={o2cQtyDispatched}
+                      onChange={(e) => setO2cQtyDispatched(e.target.value)}
                       className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
                     />
                   </div>
+
                   <div className="space-y-1">
-                    <div className="flex justify-between items-center">
-                      <label className="text-xs font-bold text-slate-700">Transport</label>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAddListKey('transports');
-                          setShowAddMasterModal(true);
-                        }}
-                        className="text-[10px] font-bold text-pink-brand hover:underline"
-                      >
-                        + Add
-                      </button>
-                    </div>
+                    <label className="text-xs font-bold text-slate-700">Product Category *</label>
                     <select
-                      value={o2dTransport}
-                      onChange={(e) => setO2dTransport(e.target.value)}
+                      value={o2cProductCategory}
+                      onChange={(e) => setO2cProductCategory(e.target.value)}
                       className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
                     >
-                      <option value="">Default ({fmsFlow?.all_form_data?.transport || 'Transport'})</option>
-                      {(masterLists['transports'] || []).map((tr) => (
-                        <option key={tr} value={tr}>
-                          {tr}
-                        </option>
-                      ))}
+                      <option value="Top / T-Shirt">Top / T-Shirt</option>
+                      <option value="Lower / Track Pant">Lower / Track Pant</option>
+                      <option value="Kurti">Kurti</option>
+                      <option value="Leggings">Leggings</option>
+                      <option value="Nightwear / Set">Nightwear / Set</option>
+                      <option value="Fancy Suit">Fancy Suit</option>
+                      <option value="Other">Other</option>
                     </select>
                   </div>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-xs font-bold text-slate-700">Transport</label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAddListKey('transports');
+                        setShowAddMasterModal(true);
+                      }}
+                      className="text-[10px] font-bold text-pink-brand hover:underline"
+                    >
+                      + Add New Transport
+                    </button>
+                  </div>
+                  <select
+                    value={o2cTransport}
+                    onChange={(e) => setO2cTransport(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
+                  >
+                    <option value="">Default ({fmsFlow?.all_form_data?.transport_name || 'Transport'})</option>
+                    {(masterLists['transports'] || []).map((tr) => (
+                      <option key={tr} value={tr}>
+                        {tr}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-xs font-bold text-slate-700">Customer Cross-Check *</label>
+                  <select
+                    value={o2cCrossCheckVerified}
+                    onChange={(e) => setO2cCrossCheckVerified(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
+                  >
+                    <option value="Yes — Fully Verified">Yes — Fully Verified (नाम व पार्टी सही है)</option>
+                    <option value="No — Discrepancy Found">No — Discrepancy Found (नाम मेल नहीं खाता)</option>
+                  </select>
                 </div>
 
                 {/* Batch Action Buttons */}
@@ -627,12 +694,12 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      disabled={o2dSavingBatch}
-                      onClick={() => handleSaveO2DDispatchBatch(false)}
+                      disabled={o2cSavingBatch}
+                      onClick={() => handleSaveO2CDispatchBatch(false)}
                       className="flex-1 py-3 rounded-xl bg-pink-brand hover:bg-[#C4177A] text-white font-extrabold text-xs flex items-center justify-center gap-1.5 transition active:scale-98 shadow-sm"
                     >
                       <Plus className="w-4 h-4" />
-                      <span>{o2dSavingBatch ? 'Saving...' : '+ Save & Add More'}</span>
+                      <span>{o2cSavingBatch ? 'Saving...' : '+ Save Dispatch Batch'}</span>
                     </button>
 
                     <button
@@ -641,93 +708,24 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
                         onSuccess();
                         onClose();
                       }}
-                      className="py-3 px-4 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 font-extrabold text-xs flex items-center justify-center gap-1.5 transition active:scale-98"
+                      className="py-3 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-extrabold text-xs flex items-center justify-center gap-1.5 transition active:scale-98"
                     >
                       <X className="w-4 h-4" />
-                      <span>Close / Back</span>
+                      <span>Close</span>
                     </button>
                   </div>
 
-                  {o2dPercent >= 80 && (
+                  {o2cPercent >= 80 && (
                     <button
                       type="button"
-                      disabled={o2dSavingBatch}
-                      onClick={() => handleSaveO2DDispatchBatch(true)}
-                      className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-2 shadow-md transition active:scale-98"
+                      disabled={o2cSavingBatch}
+                      onClick={() => handleSaveO2CDispatchBatch(true)}
+                      className="w-full py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs flex items-center justify-center gap-2 shadow-md transition active:scale-98"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Dispatch Completed (हस्तांतरित करें KR / हिमांशु को)</span>
+                      <span>Complete Dispatch Step (&ge; 80%) ✓ (Advance to Manoj Bhaiya)</span>
                     </button>
                   )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ========================================================================= */}
-          {/* O2D STEP 3 CUSTOM UI: KR / Himanshu Gurjar Complete the Order */}
-          {/* ========================================================================= */}
-          {isO2DStep3 && (
-            <div className="space-y-4">
-              <div className="p-4 bg-purple-50/80 border border-purple-200 rounded-2xl space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-black text-purple-900 uppercase">
-                    Step 3 • Order Settlement &amp; Closure
-                  </span>
-                  <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                    Dispatched: {o2dTotalDispatched} / {fmsFlow?.all_form_data?.quantity} Pcs ({Math.round(o2dPercent)}%)
-                  </span>
-                </div>
-
-                {/* Dispatch history summary */}
-                <div className="p-3 bg-white rounded-xl border border-purple-200 text-xs space-y-1.5 max-h-36 overflow-y-auto">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase block">Dispatch Batches Verified:</span>
-                  {o2dDispatches.map((d: any, idx: number) => (
-                    <div key={idx} className="flex justify-between border-b border-slate-100 pb-1 text-slate-700">
-                      <span>Bill: {d.bill_no} ({d.transport})</span>
-                      <strong>{d.qty_dispatched} Pcs</strong>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="space-y-2 pt-1">
-                  <label className="block text-xs font-extrabold text-navy-900">
-                    Order 80% se jyada dispatch hogaya? <span className="text-pink-brand">*</span>
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {['Yes / Haan', 'No / Nahi'].map((opt) => {
-                      const isSelected = formData.order_80_percent_dispatched === opt;
-                      return (
-                        <button
-                          key={opt}
-                          type="button"
-                          onClick={() => setFormData({ ...formData, order_80_percent_dispatched: opt })}
-                          className={`py-2.5 rounded-xl font-extrabold text-xs flex items-center justify-center gap-1.5 transition ${
-                            isSelected
-                              ? 'bg-navy-900 text-white shadow-xs'
-                              : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'
-                          }`}
-                        >
-                          {isSelected && <Check className="w-3.5 h-3.5" />}
-                          {opt}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="space-y-1">
-                  <label className="block text-xs font-extrabold text-navy-900">
-                    Your Name (Confirmer) <span className="text-pink-brand">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formData.confirmed_by_name || ''}
-                    onChange={(e) => setFormData({ ...formData, confirmed_by_name: e.target.value })}
-                    placeholder="Enter your name (e.g. KR / Himanshu)"
-                    className="w-full px-3 py-2 bg-white border border-purple-200 rounded-xl text-xs font-bold text-navy-900 outline-none focus:border-pink-brand"
-                  />
                 </div>
               </div>
             </div>
@@ -747,11 +745,24 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
                 </span>
               </div>
 
-              <div className="p-3 bg-white rounded-xl border border-purple-200 text-xs space-y-1">
-                <span className="text-[10px] font-bold text-slate-400 block uppercase">Prefilled Message:</span>
-                <p className="font-semibold text-slate-800 italic">
-                  "Hey, this is the PO number : {fmsFlow?.display_number} of {fmsFlow?.all_form_data?.fabric_name}"
-                </p>
+              <div className="p-3.5 bg-white rounded-xl border border-purple-200 text-xs space-y-1.5 leading-relaxed">
+                <span className="text-[10px] font-bold text-slate-400 block uppercase">Prefilled Message Preview:</span>
+                <div className="text-slate-800 text-[11px] whitespace-pre-line bg-purple-50/50 p-2.5 rounded-lg border border-purple-100 font-sans">
+                  {`🏢 *Ketan Aditya Textiles LLP*
+
+Dear ${fmsFlow?.all_form_data?.agent_name || 'Partner'},
+
+Please find our Purchase Order details below for processing:
+
+📄 *PO Number:* ${fmsFlow?.display_number || 'PO'}
+🧵 *Fabric Quality:* ${fmsFlow?.all_form_data?.fabric_name || 'Fabric Quality'}
+📅 *Date:* ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}
+
+Kindly include the PO Number in the receipt.
+
+Best regards,
+*Purchase Team | Ketan Aditya*`}
+                </div>
               </div>
 
               <button
@@ -800,7 +811,7 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
           {/* ========================================================================= */}
           {/* REGULAR FMS STEPS / CHECKLIST FORMS */}
           {/* ========================================================================= */}
-          {!isO2DStep2 && !isO2DStep3 && !isPurStep3 && (
+          {!isO2CStep4 && !isPurStep3 && (
             <form id="work-form" onSubmit={handleSubmit} className="space-y-4">
               {item.source_module === 'fms' && currentStepDef ? (
                 currentStepDef.questions.map((q: any) => {
@@ -944,12 +955,53 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
                   />
                 </div>
               )}
+
+              {/* WhatsApp Action Preview for Steps with whatsapp_template */}
+              {currentStepDef?.whatsapp_template && (
+                <div className="p-3.5 bg-emerald-50/80 border border-emerald-200 rounded-2xl space-y-2">
+                  <div className="flex items-center justify-between text-xs font-extrabold text-emerald-900">
+                    <span className="flex items-center gap-1.5">
+                      <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
+                      WhatsApp Notification Ready
+                    </span>
+                    <span className="text-[10px] text-emerald-700 bg-emerald-100/70 px-2 py-0.5 rounded-full font-bold">
+                      1-Tap Send
+                    </span>
+                  </div>
+                  <WhatsAppButton
+                    phone={
+                      formData.customer_mobile ||
+                      fmsFlow?.all_form_data?.customer_mobile ||
+                      ''
+                    }
+                    message={
+                      whatsappTemplates[
+                        currentStepDef.whatsapp_template.template_key as keyof typeof whatsappTemplates
+                      ]?.({
+                        customerName:
+                          formData.customer_name_corrected ||
+                          formData.customer_name ||
+                          fmsFlow?.all_form_data?.customer_name_corrected ||
+                          fmsFlow?.all_form_data?.customer_name,
+                        orderNumber: fmsFlow?.display_number,
+                        totalQuantity: formData.quantity || fmsFlow?.all_form_data?.quantity,
+                        dispatchedQuantity: fmsFlow?.all_form_data?.total_dispatched,
+                        leadTimeDays: formData.lead_time_days || fmsFlow?.all_form_data?.lead_time_days,
+                        transportName: formData.transport_name || fmsFlow?.all_form_data?.transport_name,
+                        dueDate: fmsFlow?.all_form_data?.payment_due_date,
+                        billAmount: fmsFlow?.all_form_data?.total_bill_amount,
+                      }) || 'Hello from Ketan Aditya Textiles LLP'
+                    }
+                    label="📲 Send Message on WhatsApp"
+                  />
+                </div>
+              )}
             </form>
           )}
         </div>
 
-        {/* Footer Actions (for standard forms & O2D Step 3) */}
-        {!isO2DStep2 && (
+        {/* Footer Actions (for standard forms) */}
+        {!isO2CStep4 && (
           <div className="p-4 border-t border-[#E8ECF0] flex items-center gap-3 bg-white">
             <button
               type="button"
@@ -960,16 +1012,14 @@ export const WorkModal: React.FC<WorkModalProps> = ({ item, isOpen, onClose, onS
             </button>
             <button
               type="submit"
-              form={isPurStep3 || isO2DStep3 ? undefined : 'work-form'}
-              onClick={isPurStep3 || isO2DStep3 ? handleSubmit : undefined}
+              form={isPurStep3 ? undefined : 'work-form'}
+              onClick={isPurStep3 ? handleSubmit : undefined}
               disabled={loading}
               className="flex-1 min-h-[48px] rounded-xl bg-pink-brand hover:bg-[#C4177A] text-white font-extrabold text-sm transition-all active:scale-[0.98] flex items-center justify-center gap-2 shadow-md"
             >
               {loading
                 ? 'Submitting...'
-                : isO2DStep3
-                ? 'Complete & Close Order ✓'
-                : item.source_module === 'fms' && item.step_no === 6
+                : item.source_module === 'fms' && item.step_no === 6 && item.fms_code === 'PUR'
                 ? 'Confirm & Complete PO ✓'
                 : t.submit}
             </button>

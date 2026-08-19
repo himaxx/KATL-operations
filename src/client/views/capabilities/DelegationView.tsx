@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { Send, Plus, UserCheck, Clock, AlertTriangle, CheckCircle2, MessageSquare } from 'lucide-react';
 
 export const DelegationView: React.FC = () => {
+  const { user } = useAuth();
   const { t } = useLanguage();
   const [delegations, setDelegations] = useState<any[]>([]);
   const [users, setUsers] = useState<any[]>([]);
@@ -107,7 +109,7 @@ export const DelegationView: React.FC = () => {
           <p className="text-xs text-emerald-800">{lastAssigned.titleEn}</p>
           <a
             href={`https://wa.me/91${lastAssigned.mobile}?text=${encodeURIComponent(
-              `KATL Ops: New task assigned to you: "${lastAssigned.titleEn}". Please check the app and mark done.`
+              `📌 *KATL Operations | Task Assignment*\n\nHello, a new delegated task for you:\n\n📝 *Task:* ${lastAssigned.titleEn}\n📅 *Due By:* Today, 8:00 PM IST\n👤 *Assigned By:* ${user?.name || 'Management'}\n\nPlease review the details in the KATL Ops app and mark it complete once done. Thank you!`
             )}`}
             target="_blank"
             rel="noreferrer"
@@ -152,7 +154,7 @@ export const DelegationView: React.FC = () => {
                   <span className="text-xs text-slate-400">By: {d.created_by_name}</span>
                   <a
                     href={`https://wa.me/91${d.assignee_mobile}?text=${encodeURIComponent(
-                      `KATL Ops Reminder: Delegated task "${d.title_en}" is awaiting your update in app.`
+                      `📌 *KATL Operations | Task Assignment*\n\nHello, a new delegated task for you:\n\n📝 *Task:* ${d.title_en}\n📅 *Due By:* Today, 8:00 PM IST\n👤 *Assigned By:* ${d.created_by_name || user?.name || 'Management'}\n\nPlease review the details in the KATL Ops app and mark it complete once done. Thank you!`
                     )}`}
                     target="_blank"
                     rel="noreferrer"

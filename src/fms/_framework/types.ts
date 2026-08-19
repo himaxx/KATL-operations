@@ -54,6 +54,10 @@ export interface FmsStep {
   repeatable?: RepeatConfig;
   branches?: Branch[];
   on_complete?: 'NEXT' | { goto_step: number } | 'CLOSE';
+  whatsapp_template?: {
+    template_key: string;
+    recipient_type: 'CUSTOMER' | 'AGENT' | 'BOTH';
+  };
 }
 
 export interface FmsDefinition {

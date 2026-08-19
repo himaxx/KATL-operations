@@ -3,7 +3,7 @@ import { Users, Check, Loader2, AlertCircle } from 'lucide-react';
 
 const ALL_SYSTEMS = [
   { code: 'CL', label: 'CL', desc: 'Checklist' },
-  { code: 'O2D', label: 'O2D', desc: 'Order to Delivery' },
+  { code: 'O2C', label: 'O2C', desc: 'Order to Collection' },
   { code: 'Purchase', label: 'PUR', desc: 'Purchase FMS' },
 ];
 

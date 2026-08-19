@@ -10,17 +10,19 @@ import {
   TrendingDown,
 } from 'lucide-react';
 
-type Period = 'daily' | 'weekly' | 'quarterly';
+type Period = 'daily' | 'weekly' | 'monthly' | 'quarterly';
 
 const PERIOD_LABELS: Record<Period, string> = {
   daily: 'Daily',
   weekly: 'Weekly',
+  monthly: 'Monthly',
   quarterly: 'Quarterly',
 };
 
 const PERIOD_DESC: Record<Period, string> = {
   daily: "Today's tasks only",
   weekly: 'This week (Mon – Sat)',
+  monthly: 'Current month',
   quarterly: 'Current FY quarter',
 };
 
@@ -66,6 +68,7 @@ export const UserScoreView: React.FC = () => {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${localStorage.getItem('katl_token')}`,
         },
+        body: JSON.stringify({}),
       });
       if (res.ok) {
         // Immediately refresh score data
@@ -116,10 +119,10 @@ export const UserScoreView: React.FC = () => {
         )}
       </div>
 
-      {/* Period tabs: Daily | Weekly | Quarterly */}
+      {/* Period tabs: Daily | Weekly | Monthly | Quarterly */}
       <div className="mx-4 mt-4">
         <div className="flex gap-1 bg-[#F4F6F9] rounded-xl p-1">
-          {(['daily', 'weekly', 'quarterly'] as Period[]).map((p) => (
+          {(['daily', 'weekly', 'monthly', 'quarterly'] as Period[]).map((p) => (
             <button
               key={p}
               onClick={() => setPeriod(p)}
@@ -230,6 +233,8 @@ export const UserScoreView: React.FC = () => {
                       day: '2-digit',
                       month: 'short',
                     });
+                    const taskType = d.taskType || (d.sourceModule === 'fms' ? 'FMS' : d.sourceModule === 'delegation' ? 'DELEGATION' : 'REPETITIVE');
+
                     return (
                       <div
                         key={d.id}
@@ -238,14 +243,23 @@ export const UserScoreView: React.FC = () => {
                         <div className="flex items-start gap-2 flex-1 min-w-0">
                           <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" />
                           <div className="min-w-0">
-                            <p className="text-xs font-semibold text-[#374151] leading-snug truncate">
-                              {title}
-                            </p>
-                            {d.isImportant && (
-                              <span className="text-[10px] text-[#BF1270] font-bold">
-                                Important (3× weight)
-                              </span>
-                            )}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <p className="text-xs font-semibold text-[#374151] leading-snug">
+                                {title}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                              {taskType && (
+                                <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                                  {taskType}
+                                </span>
+                              )}
+                              {d.isImportant && (
+                                <span className="text-[9px] text-[#BF1270] font-bold bg-[#FFF5F8] px-1.5 py-0.5 rounded border border-[#F9BFDF]">
+                                  Important (3×)
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </div>
                         <div className="shrink-0 text-right">
@@ -265,7 +279,7 @@ export const UserScoreView: React.FC = () => {
                   })
                 ) : (
                   <div className="rounded-xl border border-dashed border-[#D1D5DB] py-8 text-center">
-                    <p className="text-xs text-[#9CA3AF] font-medium">No tasks completed yet.</p>
+                    <p className="text-xs text-[#9CA3AF] font-medium">No tasks completed yet in this period.</p>
                   </div>
                 )}
               </div>
@@ -277,7 +291,7 @@ export const UserScoreView: React.FC = () => {
                 {notDoneCount > 0 && (
                   <div className="mx-0 mb-2 p-2.5 rounded-lg bg-[#FFF5F8] border border-[#F9BFDF]">
                     <p className="text-[10px] text-[#9F0E5A] font-bold leading-snug">
-                      💡 Tap <strong>Submit</strong> to mark a past task as done. It will count towards Work Done but will be marked <em>Late</em> since it's past the deadline.
+                      💡 Tap <strong>Submit</strong> to mark a past task as done. It will count towards Work Done (Done Late).
                     </p>
                   </div>
                 )}
@@ -292,58 +306,85 @@ export const UserScoreView: React.FC = () => {
                       month: 'short',
                     });
                     const isSubmitting = submittingId === nd.id;
+                    const isFlagged = nd.status === 'FLAGGED_FALSE' || nd.isFlaggedFalse;
+                    const taskType = nd.taskType || (nd.sourceModule === 'fms' ? 'FMS' : nd.sourceModule === 'delegation' ? 'DELEGATION' : 'REPETITIVE');
+
                     return (
                       <div
                         key={nd.id}
-                        className="bg-white border border-[#E8ECF0] rounded-xl p-3 flex items-center gap-2"
+                        className={`rounded-xl p-3 border transition-all ${
+                          isFlagged
+                            ? 'bg-[#FFF5F8] border-[#F9BFDF]'
+                            : 'bg-white border-[#E8ECF0]'
+                        }`}
                       >
-                        <Clock className="w-4 h-4 text-[#9CA3AF] shrink-0 mt-0.5" />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-semibold text-[#374151] leading-snug">
-                            {title}
-                          </p>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            <span className="text-[10px] text-[#9CA3AF] font-medium">
-                              Due: {plannedDate}
-                            </span>
-                            {nd.isImportant && (
-                              <span className="text-[10px] text-[#BF1270] font-bold flex items-center gap-0.5">
-                                <AlertTriangle className="w-2.5 h-2.5" />
-                                Important
-                              </span>
-                            )}
-                            {nd.status === 'FLAGGED_FALSE' && (
-                              <span className="text-[10px] text-amber-700 font-bold bg-amber-50 px-1 rounded">
-                                Flagged
-                              </span>
-                            )}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-start gap-2 flex-1 min-w-0">
+                            <Clock className={`w-4 h-4 mt-0.5 shrink-0 ${isFlagged ? 'text-[#BF1270]' : 'text-[#9CA3AF]'}`} />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-semibold text-[#374151] leading-snug">
+                                {title}
+                              </p>
+                              
+                              {/* Meta Tags */}
+                              <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                                <span className="text-[10px] text-[#9CA3AF] font-medium">
+                                  Due: {plannedDate}
+                                </span>
+                                {taskType && (
+                                  <span className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                                    {taskType}
+                                  </span>
+                                )}
+                                {nd.isImportant && (
+                                  <span className="text-[9px] text-[#BF1270] font-bold bg-[#FFF5F8] px-1.5 py-0.5 rounded border border-[#F9BFDF] flex items-center gap-0.5">
+                                    <AlertTriangle className="w-2.5 h-2.5" />
+                                    Important (3×)
+                                  </span>
+                                )}
+                                {isFlagged && (
+                                  <span className="text-[9px] text-amber-800 font-extrabold bg-amber-100 px-1.5 py-0.5 rounded border border-amber-200">
+                                    Audit Flagged
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Flagged false audit message */}
+                              {isFlagged && (
+                                <p className="text-[10px] text-[#BF1270] font-bold mt-1.5 italic">
+                                  Marked done but not actually done — checked by {nd.checkedByName || 'Manager'}
+                                  {nd.flaggedReason ? ` ("${nd.flaggedReason}")` : ''}
+                                </p>
+                              )}
+                            </div>
                           </div>
+
+                          {/* Submit button — calls late-submit endpoint */}
+                          <button
+                            onClick={() => handleLateSubmit(nd.id)}
+                            disabled={isSubmitting || isFlagged}
+                            className={`shrink-0 px-3 py-2 rounded-lg text-[11px] font-extrabold flex items-center gap-1.5 transition-all active:scale-[0.96] ${
+                              isFlagged
+                                ? 'bg-[#F4F6F9] text-[#9CA3AF] cursor-not-allowed border border-slate-200'
+                                : isSubmitting
+                                ? 'bg-[#F4F6F9] text-[#9CA3AF] cursor-wait'
+                                : 'bg-navy-900 text-white hover:bg-navy-800 shadow-sm'
+                            }`}
+                          >
+                            {isSubmitting ? (
+                              <RefreshCw className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Send className="w-3 h-3 text-pink-brand" />
+                            )}
+                            {isSubmitting ? '' : 'Submit'}
+                          </button>
                         </div>
-                        {/* Submit button — calls late-submit endpoint */}
-                        <button
-                          onClick={() => handleLateSubmit(nd.id)}
-                          disabled={isSubmitting || nd.status === 'FLAGGED_FALSE'}
-                          className={`shrink-0 px-3 py-2 rounded-lg text-[11px] font-extrabold flex items-center gap-1.5 transition-all active:scale-[0.96] ${
-                            nd.status === 'FLAGGED_FALSE'
-                              ? 'bg-[#F4F6F9] text-[#9CA3AF] cursor-not-allowed'
-                              : isSubmitting
-                              ? 'bg-[#F4F6F9] text-[#9CA3AF] cursor-wait'
-                              : 'bg-navy-900 text-white hover:bg-navy-800'
-                          }`}
-                        >
-                          {isSubmitting ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Send className="w-3 h-3" />
-                          )}
-                          {isSubmitting ? '' : 'Submit'}
-                        </button>
                       </div>
                     );
                   })
                 ) : (
                   <div className="rounded-xl border border-dashed border-[#D1FAE5] py-8 text-center">
-                    <p className="text-xs text-emerald-700 font-bold">All tasks completed!</p>
+                    <p className="text-xs text-emerald-700 font-bold">All tasks completed for this period!</p>
                   </div>
                 )}
               </div>

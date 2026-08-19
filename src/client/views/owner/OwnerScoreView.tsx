@@ -2,9 +2,25 @@ import React, { useState, useEffect } from 'react';
 import { useLanguage } from '../../context/LanguageContext';
 import { Download, CheckCircle2, ChevronDown, ChevronUp, RefreshCw, Clock, AlertTriangle } from 'lucide-react';
 
+type Period = 'daily' | 'weekly' | 'monthly' | 'quarterly';
+
+const PERIOD_LABELS: Record<Period, string> = {
+  daily: 'Daily',
+  weekly: 'Weekly',
+  monthly: 'Monthly',
+  quarterly: 'Quarterly',
+};
+
+const PERIOD_DESC: Record<Period, string> = {
+  daily: "Today's live performance",
+  weekly: 'This week (Mon – Sat)',
+  monthly: 'Current month',
+  quarterly: 'Current FY quarter',
+};
+
 export const OwnerScoreView: React.FC = () => {
   const { t } = useLanguage();
-  const [period, setPeriod] = useState<'today' | 'this_week'>('today');
+  const [period, setPeriod] = useState<Period>('daily');
   const [teamScores, setTeamScores] = useState<any[]>([]);
   const [search, setSearch] = useState('');
   const [expandedUser, setExpandedUser] = useState<string | null>(null);
@@ -42,15 +58,33 @@ export const OwnerScoreView: React.FC = () => {
 
   const handleExportCSV = () => {
     if (teamScores.length === 0) return;
-    const headers = ['Staff Name', 'Mobile', 'Role', 'Work Done (%)', 'Work On Time (%)', 'Tasks Total', 'Tasks Done'];
+    const headers = [
+      'Staff Name',
+      'Mobile',
+      'Role',
+      'Period',
+      'Work Done (%)',
+      'Work On Time (%)',
+      'Tasks Total',
+      'Tasks Done',
+      'Tasks Pending',
+      'Weighted Due',
+      'Weighted Done',
+      'Weighted On-Time',
+    ];
     const rows = teamScores.map((s) => [
       `"${s.name}"`,
       `"${s.mobile || ''}"`,
       `"${s.role}"`,
+      `"${PERIOD_LABELS[period]}"`,
       `"${s.displayWorkDone}"`,
       `"${s.displayWorkOnTime}"`,
-      s.totalTasks || s.weightedDue,
-      s.doneTasksCount || s.weightedDone,
+      s.totalTasks ?? 0,
+      s.doneTasksCount ?? 0,
+      s.pendingTasksCount ?? 0,
+      s.weightedDue ?? 0,
+      s.weightedDone ?? 0,
+      s.weightedOnTime ?? 0,
     ]);
 
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map((e) => e.join(','))].join('\n');
@@ -69,14 +103,20 @@ export const OwnerScoreView: React.FC = () => {
 
   const totalCompanyDone = teamScores.reduce((acc, s) => acc + (s.doneTasksCount || 0), 0);
   const totalCompanyTasks = teamScores.reduce((acc, s) => acc + (s.totalTasks || 0), 0);
+  const totalWeightedDue = teamScores.reduce((acc, s) => acc + (s.weightedDue || 0), 0);
+  const totalWeightedDone = teamScores.reduce((acc, s) => acc + (s.weightedDone || 0), 0);
+  const totalWeightedOnTime = teamScores.reduce((acc, s) => acc + (s.weightedOnTime || 0), 0);
+
   const companyPct = totalCompanyTasks > 0 ? Math.round((totalCompanyDone / totalCompanyTasks) * 100) : 100;
+  const companyWdScore = totalWeightedDue > 0 ? `-${Math.round(100 - (totalWeightedDone / totalWeightedDue) * 100)}%` : '0%';
+  const companyOtScore = totalWeightedDue > 0 ? `-${Math.round(100 - (totalWeightedOnTime / totalWeightedDue) * 100)}%` : '0%';
 
   return (
     <div className="min-h-full bg-white pb-24">
       {/* Hero */}
       <div className="mx-4 mt-4 rounded-2xl hero-gradient p-5 relative">
-        <p className="text-pink-brand font-extrabold text-sm mb-0.5">Team Scores.</p>
-        <p className="text-white text-xs font-medium opacity-80">Live MIS Performance — 0% is perfect</p>
+        <p className="text-pink-brand font-extrabold text-sm mb-0.5">Team MIS Scores.</p>
+        <p className="text-white text-xs font-medium opacity-80">Live Company Performance — 0% is perfect score</p>
         {isRefreshing && (
           <div className="absolute top-3 right-3">
             <RefreshCw className="w-3.5 h-3.5 text-pink-brand animate-spin" />
@@ -85,46 +125,59 @@ export const OwnerScoreView: React.FC = () => {
       </div>
 
       <div className="mx-4 mt-4">
-        {/* Period + Export row */}
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex gap-1 bg-[#F4F6F9] rounded-xl p-1">
-            <button
-              onClick={() => setPeriod('today')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                period === 'today' ? 'bg-white text-navy-900 shadow-sm' : 'text-[#9CA3AF]'
-              }`}
-            >
-              Today
-            </button>
-            <button
-              onClick={() => setPeriod('this_week')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                period === 'this_week' ? 'bg-white text-navy-900 shadow-sm' : 'text-[#9CA3AF]'
-              }`}
-            >
-              This Week
-            </button>
+        {/* Period tabs: Daily | Weekly | Monthly | Quarterly + Export */}
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <div className="flex gap-1 bg-[#F4F6F9] rounded-xl p-1 flex-1">
+            {(['daily', 'weekly', 'monthly', 'quarterly'] as Period[]).map((p) => (
+              <button
+                key={p}
+                onClick={() => setPeriod(p)}
+                className={`flex-1 py-1.5 rounded-lg text-[11px] font-bold transition-all ${
+                  period === p ? 'bg-white text-navy-900 shadow-sm' : 'text-[#9CA3AF]'
+                }`}
+              >
+                {PERIOD_LABELS[p]}
+              </button>
+            ))}
           </div>
 
           <button
             onClick={handleExportCSV}
-            className="min-h-[36px] px-3.5 rounded-xl bg-navy-900 text-white text-xs font-bold flex items-center gap-1.5 active:scale-[0.98] transition"
+            className="min-h-[34px] px-3.5 rounded-xl bg-navy-900 text-white text-xs font-bold flex items-center gap-1.5 active:scale-[0.98] transition hover:bg-navy-800 shadow-sm shrink-0"
           >
             <Download className="w-3.5 h-3.5 text-pink-brand" />
-            CSV
+            CSV Export
           </button>
         </div>
 
+        <p className="text-[10px] text-[#9CA3AF] text-center mb-3 font-medium">
+          {PERIOD_DESC[period]}
+        </p>
+
         {/* Overall Company Summary Widget */}
-        <div className="p-4 rounded-2xl bg-navy-900 text-white mb-3 flex items-center justify-between">
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-wider text-[#9CA3AF] mb-0.5">Company-wide Completion</p>
-            <p className="text-sm font-extrabold text-white">{totalCompanyDone} / {totalCompanyTasks} tasks</p>
+        <div className="p-4 rounded-2xl bg-navy-900 text-white mb-3">
+          <div className="flex items-center justify-between mb-2">
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-[#9CA3AF] mb-0.5">Company-wide Completion</p>
+              <p className="text-sm font-extrabold text-white">{totalCompanyDone} / {totalCompanyTasks} tasks finished</p>
+            </div>
+            <div className="text-right">
+              <p className="text-2xl font-black text-pink-brand">{companyPct}%</p>
+            </div>
           </div>
-          <div className="text-right">
-            <p className="text-2xl font-black text-pink-brand">{companyPct}%</p>
-            <div className="w-24 h-1.5 bg-[#2D3561] rounded-full overflow-hidden mt-1">
-              <div className="h-full bg-pink-brand rounded-full transition-all duration-500" style={{ width: `${companyPct}%` }} />
+
+          <div className="w-full h-1.5 bg-[#2D3561] rounded-full overflow-hidden mb-3">
+            <div className="h-full bg-pink-brand rounded-full transition-all duration-500" style={{ width: `${companyPct}%` }} />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#2D3561]">
+            <div className="text-center">
+              <span className="text-[9px] uppercase font-bold text-[#9CA3AF] block">Company Work Done</span>
+              <span className="text-sm font-black text-white">{companyWdScore === '-0%' ? '0%' : companyWdScore}</span>
+            </div>
+            <div className="text-center">
+              <span className="text-[9px] uppercase font-bold text-[#9CA3AF] block">Company On Time</span>
+              <span className="text-sm font-black text-white">{companyOtScore === '-0%' ? '0%' : companyOtScore}</span>
             </div>
           </div>
         </div>
@@ -210,6 +263,9 @@ export const OwnerScoreView: React.FC = () => {
                     >
                       <span className="text-[9px] uppercase font-bold block opacity-80">Work Done</span>
                       <span className="text-base font-black">{score.displayWorkDone}</span>
+                      <span className="text-[9px] font-semibold opacity-70 block">
+                        {score.weightedDone}/{score.weightedDue} wt
+                      </span>
                     </div>
 
                     <div
@@ -221,6 +277,9 @@ export const OwnerScoreView: React.FC = () => {
                     >
                       <span className="text-[9px] uppercase font-bold block opacity-80">Work On Time</span>
                       <span className="text-base font-black">{score.displayWorkOnTime}</span>
+                      <span className="text-[9px] font-semibold opacity-70 block">
+                        {score.weightedOnTime}/{score.weightedDue} wt
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -241,15 +300,34 @@ export const OwnerScoreView: React.FC = () => {
                               key={d.id}
                               className="p-2 rounded-xl bg-white border border-[#D1FAE5] text-xs flex items-center justify-between gap-2"
                             >
-                              <span className="font-semibold text-[#374151] truncate">{d.titleEn}</span>
-                              <span className="text-[10px] font-extrabold text-emerald-700 shrink-0">
-                                {new Date(d.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                              </span>
+                              <div className="min-w-0 flex-1">
+                                <span className="font-semibold text-[#374151] block truncate">{d.titleEn}</span>
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  {d.taskType && (
+                                    <span className="text-[8px] font-black uppercase px-1 py-0.2 rounded bg-slate-100 text-slate-600">
+                                      {d.taskType}
+                                    </span>
+                                  )}
+                                  {d.isImportant && (
+                                    <span className="text-[8px] font-bold text-[#BF1270] bg-[#FFF5F8] px-1 py-0.2 rounded">
+                                      Important
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="shrink-0 text-right">
+                                <span className="text-[10px] font-extrabold text-emerald-700 block">
+                                  {new Date(d.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                </span>
+                                <span className={`text-[9px] font-bold ${d.isOnTime ? 'text-emerald-600' : 'text-amber-600'}`}>
+                                  {d.isOnTime ? '✓ On time' : '⚠ Late'}
+                                </span>
+                              </div>
                             </div>
                           ))}
                         </div>
                       ) : (
-                        <p className="text-[11px] text-[#9CA3AF]">No tasks completed yet today.</p>
+                        <p className="text-[11px] text-[#9CA3AF]">No tasks completed yet in this period.</p>
                       )}
                     </div>
 
@@ -266,12 +344,29 @@ export const OwnerScoreView: React.FC = () => {
                               key={nd.id}
                               className="p-2 rounded-xl bg-white border border-[#E8ECF0] text-xs flex items-center justify-between gap-2"
                             >
-                              <span className="font-semibold text-[#374151] truncate">{nd.titleEn}</span>
-                              {nd.isImportant && (
-                                <span className="text-[9px] font-black text-[#BF1270] bg-[#FFF5F8] px-1.5 py-0.5 rounded border border-[#F9BFDF] shrink-0">
-                                  Important
-                                </span>
-                              )}
+                              <div className="min-w-0 flex-1">
+                                <span className="font-semibold text-[#374151] block truncate">{nd.titleEn}</span>
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  {nd.taskType && (
+                                    <span className="text-[8px] font-black uppercase px-1 py-0.2 rounded bg-slate-100 text-slate-600">
+                                      {nd.taskType}
+                                    </span>
+                                  )}
+                                  {nd.isImportant && (
+                                    <span className="text-[8px] font-bold text-[#BF1270] bg-[#FFF5F8] px-1 py-0.2 rounded">
+                                      Important (3×)
+                                    </span>
+                                  )}
+                                  {nd.status === 'FLAGGED_FALSE' && (
+                                    <span className="text-[8px] font-bold text-amber-800 bg-amber-50 px-1 py-0.2 rounded">
+                                      Audit Flagged
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <span className="text-[10px] text-[#9CA3AF] font-medium shrink-0">
+                                Due: {new Date(nd.plannedAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -290,3 +385,4 @@ export const OwnerScoreView: React.FC = () => {
     </div>
   );
 };
+

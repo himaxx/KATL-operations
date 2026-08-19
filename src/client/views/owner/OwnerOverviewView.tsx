@@ -37,7 +37,7 @@ export const OwnerOverviewView: React.FC<OwnerOverviewProps> = ({ onNavigateTab 
   }, []);
 
   const activeFlowsCount = flows.filter((f) => f.status === 'ACTIVE').length;
-  const o2dFlowsCount = flows.filter((f) => f.fms_code === 'O2D' && f.status === 'ACTIVE').length;
+  const o2cFlowsCount = flows.filter((f) => (f.fms_code === 'O2C' || f.fms_code === 'O2D') && f.status === 'ACTIVE').length;
   const purFlowsCount = flows.filter((f) => f.fms_code === 'PUR' && f.status === 'ACTIVE').length;
   const jsFlowsCount = flows.filter((f) => f.fms_code === 'JS' && f.status === 'ACTIVE').length;
   const openHelpSlips = helpSlips.filter((s) => s.status === 'ASKED').length;
@@ -100,7 +100,7 @@ export const OwnerOverviewView: React.FC<OwnerOverviewProps> = ({ onNavigateTab 
         <p className="text-[11px] font-black tracking-widest uppercase text-[#9CA3AF] mb-2">Flowchart Pipeline</p>
         <div className="rounded-2xl border border-[#E8ECF0] bg-white divide-y divide-[#E8ECF0] overflow-hidden">
           {[
-            { label: 'Order-to-Delivery (O2D)', count: o2dFlowsCount },
+            { label: 'Order-to-Collection (O2C)', count: o2cFlowsCount },
             { label: 'Purchase Procurement (PUR)', count: purFlowsCount },
             { label: 'Job Slip Production (JS)', count: jsFlowsCount },
           ].map((item) => (

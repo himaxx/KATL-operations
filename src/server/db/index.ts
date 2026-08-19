@@ -1,65 +1,58 @@
 /**
- * PostgreSQL Database Adapter for KATL-Operations
- * Supabase Project: KATL-Operations (rjcgkmsqgzugvwxkkqfh)
+ * Supabase PostgreSQL Database Adapter for KATL-Operations
+ * Project: KATL-Operations (rjcgkmsqgzugvwxkkqfh)
  *
- * Provides a synchronous-compatible better-sqlite3 API backed by PostgreSQL,
- * using the execSync worker-thread Atomics bridge for blocking queries.
+ * Provides a high-performance PostgreSQL connection pool with both:
+ * 1. Synchronous compatibility interface (db.prepare().get() / .all() / .run(), db.transaction())
+ *    backed by worker-thread SharedArrayBuffer Atomics bridge for zero-breakage backend operations.
+ * 2. Asynchronous query helpers (query, queryOne, execute, sql template tag).
+ *
+ * Completely replaces SQLite — Supabase is the sole database engine.
  */
 
 import { Worker } from 'worker_threads';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import * as dotenv from 'dotenv';
-import { readFileSync } from 'fs';
 
 dotenv.config();
 
-import Database from 'better-sqlite3';
-import { existsSync, mkdirSync } from 'fs';
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
 
-const DATABASE_URL = process.env.DATABASE_URL;
-const usePostgres = Boolean(DATABASE_URL && !DATABASE_URL.includes('YOUR-DB-PASSWORD') && DATABASE_URL.startsWith('postgres'));
-
-let dbInstance: any;
-let initDbFn: () => void;
-
-if (!usePostgres) {
-  const dbPath = path.resolve(process.cwd(), 'data', 'katl_ops.db');
-  const dbDir = path.dirname(dbPath);
-  if (!existsSync(dbDir)) {
-    mkdirSync(dbDir, { recursive: true });
-  }
-
-  const sqliteDb = new Database(dbPath);
-  sqliteDb.pragma('journal_mode = WAL');
-  sqliteDb.pragma('foreign_keys = ON');
-
-  dbInstance = sqliteDb;
-  initDbFn = () => {
-    console.log('✅ SQLite connected: data/katl_ops.db');
-  };
-} else {
-
+if (!DATABASE_URL || DATABASE_URL.includes('[YOUR-DB-PASSWORD]')) {
+  console.warn('\n⚠️  [SUPABASE CONFIG WARNING]');
+  console.warn('DATABASE_URL in .env contains placeholder [YOUR-DB-PASSWORD].');
+  console.warn('Please update .env with your Supabase database password:');
+  console.warn('DATABASE_URL=postgresql://postgres.rjcgkmsqgzugvwxkkqfh:YOUR_PASSWORD@aws-0-ap-northeast-2.pooler.supabase.com:6543/postgres\n');
+}
 
 // ─── Shared memory buffer for sync bridge ─────────────────────────────────────
-// Layout: [0-3] signal int32 | [4-7] dataLen int32 | [8-...] data bytes (8MB)
-const DATA_SIZE = 8 * 1024 * 1024; // 8 MB
+// Layout: [0-3] signal int32 | [4-7] dataLen int32 | [8-...] data bytes (16MB)
+const DATA_SIZE = 16 * 1024 * 1024; // 16 MB max payload
 const sab = new SharedArrayBuffer(8 + DATA_SIZE);
 const signalArr = new Int32Array(sab, 0, 1);
 const lenArr = new Int32Array(sab, 4, 1);
-const dataArr = new Uint8Array(sab, 8, DATA_SIZE);
 
 // ─── Worker thread (CJS eval, uses postgres package directly) ─────────────────
 const WORKER_SRC = `
 const { workerData, parentPort } = require('worker_threads');
 const postgres = require('postgres');
 
-const sql = postgres(workerData.url, {
-  max: 3,
-  idle_timeout: 20,
-  connect_timeout: 15,
-  ssl: 'require',
-});
+const url = workerData.url;
+let sql;
+
+try {
+  sql = postgres(url, {
+    max: 1,
+    idle_timeout: 30,
+    connect_timeout: 15,
+    ssl: 'require',
+    transform: {
+      undefined: null,
+    },
+  });
+} catch (err) {
+  console.error('Failed to initialize postgres connection pool in worker:', err.message);
+}
 
 const sab = workerData.sab;
 const signalArr = new Int32Array(sab, 0, 1);
@@ -70,8 +63,15 @@ const DATA_SIZE = dataArr.length;
 parentPort.on('message', async ({ query, params }) => {
   let resultJson;
   try {
+    if (!sql) {
+      throw new Error('PostgreSQL connection pool not initialized. Check DATABASE_URL.');
+    }
     const rows = await sql.unsafe(query, params ?? []);
-    resultJson = JSON.stringify({ ok: true, rows: Array.from(rows), rowCount: rows.count ?? rows.length });
+    resultJson = JSON.stringify({ 
+      ok: true, 
+      rows: Array.from(rows), 
+      rowCount: rows.count ?? rows.length 
+    });
   } catch (e) {
     resultJson = JSON.stringify({ ok: false, error: e.message });
   }
@@ -85,91 +85,131 @@ parentPort.on('message', async ({ query, params }) => {
 });
 `;
 
-const worker = new Worker(WORKER_SRC, {
-  eval: true,
-  workerData: { url: DATABASE_URL, sab },
-});
+let worker: Worker | null = null;
 
-worker.on('error', (e) => { console.error('DB worker error:', e.message); });
+function getWorker(): Worker {
+  if (!worker) {
+    worker = new Worker(WORKER_SRC, {
+      eval: true,
+      workerData: { url: DATABASE_URL, sab },
+    });
+    worker.on('error', (e: any) => {
+      console.error('❌ Supabase PostgreSQL worker error:', e?.message || e);
+    });
+  }
+  return worker;
+}
 
 // ─── Core sync execution ──────────────────────────────────────────────────────
 function execSync(query: string, params: unknown[] = []): { rows: any[]; rowCount: number } {
+  if (!DATABASE_URL || DATABASE_URL.includes('[YOUR-DB-PASSWORD]')) {
+    throw new Error('Supabase password missing in .env. Please replace [YOUR-DB-PASSWORD] in DATABASE_URL with your actual Supabase database password.');
+  }
+
+  const w = getWorker();
   Atomics.store(signalArr, 0, 0);
-  worker.postMessage({ query, params });
+  w.postMessage({ query, params });
 
   const waitResult = Atomics.wait(signalArr, 0, 0, 30_000);
-  if (waitResult === 'timed-out') throw new Error(`DB timeout: ${query.substring(0, 80)}...`);
+  if (waitResult === 'timed-out') {
+    throw new Error(`Supabase query timeout (30s): ${query.substring(0, 100)}...`);
+  }
 
   const len = Atomics.load(lenArr, 0);
   const buf = Buffer.from(sab, 8, len);
   const parsed = JSON.parse(buf.toString('utf8'));
-  if (!parsed.ok) throw new Error(`DB error: ${parsed.error}\nQuery: ${query.substring(0, 200)}`);
+  if (!parsed.ok) {
+    throw new Error(`Supabase Database error: ${parsed.error}\nQuery: ${query.substring(0, 300)}`);
+  }
   return { rows: parsed.rows, rowCount: parsed.rowCount };
 }
 
-// ─── SQLite → PostgreSQL query translation ────────────────────────────────────
+// ─── Query translation & dialect mapping (SQLite → PostgreSQL) ────────────────
 
-/** Replace ? with $1, $2, ... (SQLite → PG positional params) */
-function toPostgres(sqlite: string): string {
+/** Replace ? with $1, $2, ... for PostgreSQL positional parameters */
+function toPostgresParams(sqlite: string): string {
   let i = 0;
-  // Also replace SQLite-specific syntax
-  return sqlite
-    .replace(/\?/g, () => `$${++i}`)
-    // SQLite DATE(col) → DATE(col AT TIME ZONE 'UTC') handled by query rewrite below
-    .replace(/INSERT OR IGNORE/gi, 'INSERT')
-    .replace(/INSERT OR REPLACE/gi, 'INSERT')
-    .replace(/\bINTEGER\b/gi, 'BIGINT')
-    .replace(/\bTEXT\b/gi, 'TEXT');
+  return sqlite.replace(/\?/g, () => `$${++i}`);
 }
 
-/** Map ON CONFLICT handling for INSERT OR IGNORE → ON CONFLICT DO NOTHING */
+/** Map ON CONFLICT handling for INSERT OR IGNORE / INSERT OR REPLACE */
 function fixConflict(sql: string): string {
-  if (/INSERT OR IGNORE/i.test(sql)) {
-    return sql.replace(/INSERT OR IGNORE/i, 'INSERT') + ' ON CONFLICT DO NOTHING';
+  let s = sql;
+  if (/INSERT OR IGNORE INTO/i.test(s)) {
+    s = s.replace(/INSERT OR IGNORE INTO/i, 'INSERT INTO');
+    if (!/ON CONFLICT/i.test(s)) {
+      s += ' ON CONFLICT DO NOTHING';
+    }
   }
-  if (/INSERT OR REPLACE/i.test(sql)) {
-    // Replace with UPSERT - strip " ON CONFLICT DO NOTHING" that might have been added
-    const base = sql.replace(/INSERT OR REPLACE/i, 'INSERT');
-    return base; // Caller handles ON CONFLICT
+  if (/INSERT OR REPLACE INTO checklist_definitions/i.test(s)) {
+    s = s.replace(/INSERT OR REPLACE INTO checklist_definitions/i, 'INSERT INTO checklist_definitions');
+    if (!/ON CONFLICT/i.test(s)) {
+      s += ` ON CONFLICT (id) DO UPDATE SET 
+        title_en = EXCLUDED.title_en,
+        title_hi = EXCLUDED.title_hi,
+        is_important = EXCLUDED.is_important,
+        due_time = EXCLUDED.due_time,
+        is_active = EXCLUDED.is_active`;
+    }
+  } else if (/INSERT OR REPLACE INTO/i.test(s)) {
+    s = s.replace(/INSERT OR REPLACE INTO/i, 'INSERT INTO');
+    if (!/ON CONFLICT/i.test(s)) {
+      s += ' ON CONFLICT (id) DO NOTHING';
+    }
   }
-  return sql;
+  return s;
 }
 
-/** Fix SQLite-specific date functions for PostgreSQL */
+/** Fix SQLite boolean integer comparisons and values (col = 1 / col = 0) for PostgreSQL boolean columns */
+function fixBooleanExpressions(sql: string): string {
+  return sql
+    .replace(/\b(is_active|is_important|is_done|is_on_time|is_compliance|auto_replaced|is_delegation_task)\s*=\s*1\b/gi, '$1 = TRUE')
+    .replace(/\b(is_active|is_important|is_done|is_on_time|is_compliance|auto_replaced|is_delegation_task)\s*=\s*0\b/gi, '$1 = FALSE')
+    .replace(/\b(is_active|is_important|is_done|is_on_time|is_compliance|auto_replaced|is_delegation_task)\s*!=\s*1\b/gi, '$1 = FALSE')
+    .replace(/\b(is_active|is_important|is_done|is_on_time|is_compliance|auto_replaced|is_delegation_task)\s*!=\s*0\b/gi, '$1 = TRUE')
+    .replace(/\bSET\s+is_done\s*=\s*1\b/gi, 'SET is_done = TRUE')
+    .replace(/\bSET\s+is_done\s*=\s*0\b/gi, 'SET is_done = FALSE')
+    .replace(/\bSET\s+is_on_time\s*=\s*1\b/gi, 'SET is_on_time = TRUE')
+    .replace(/\bSET\s+is_on_time\s*=\s*0\b/gi, 'SET is_on_time = FALSE')
+    .replace(/\bSET\s+is_active\s*=\s*1\b/gi, 'SET is_active = TRUE')
+    .replace(/\bSET\s+is_active\s*=\s*0\b/gi, 'SET is_active = FALSE');
+}
+
+/** Translate SQLite-specific date functions for PostgreSQL with Asia/Kolkata (IST) timezone */
 function fixDateFunctions(sql: string): string {
   return sql
     // SQLite: DATE(col, '+330 minutes') → PG: DATE((col::timestamptz AT TIME ZONE 'Asia/Kolkata'))
     .replace(/DATE\((\w+),\s*['"]\+330 minutes['"]\)/g, `(($1::timestamptz AT TIME ZONE 'Asia/Kolkata')::date)`)
-    // SQLite: DATE('now', 'localtime') → PG: CURRENT_DATE AT TIME ZONE 'Asia/Kolkata'
+    // SQLite: DATE('now', 'localtime') → PG: (NOW() AT TIME ZONE 'Asia/Kolkata')::date
     .replace(/DATE\('now',\s*'localtime'\)/g, `(NOW() AT TIME ZONE 'Asia/Kolkata')::date`)
-    // SQLite: DATE('now') → PG: CURRENT_DATE
-    .replace(/DATE\('now'\)/g, `CURRENT_DATE`)
-    // SQLite: DATE(col) → PG: (col::timestamptz)::date
-    .replace(/DATE\((\w+)\)/g, `($1::timestamptz)::date`)
+    // SQLite: DATE('now') → PG: (NOW() AT TIME ZONE 'Asia/Kolkata')::date
+    .replace(/DATE\('now'\)/g, `(NOW() AT TIME ZONE 'Asia/Kolkata')::date`)
     // SQLite: DATE(col, 'localtime') → PG: (col::timestamptz AT TIME ZONE 'Asia/Kolkata')::date
-    .replace(/DATE\((\w+),\s*'localtime'\)/g, `($1::timestamptz AT TIME ZONE 'Asia/Kolkata')::date`);
+    .replace(/DATE\((\w+),\s*'localtime'\)/g, `($1::timestamptz AT TIME ZONE 'Asia/Kolkata')::date`)
+    // SQLite: DATE(col) → PG: (col::timestamptz AT TIME ZONE 'Asia/Kolkata')::date
+    .replace(/DATE\((\w+)\)/g, `($1::timestamptz AT TIME ZONE 'Asia/Kolkata')::date`);
 }
 
-/** Normalize params: boolean integers for PG are fine, JSON strings stay strings */
+/** Normalize parameters for PostgreSQL */
 function normalizeParams(params: unknown[]): unknown[] {
-  return params.map(p => {
+  return params.map((p) => {
     if (p === undefined) return null;
     return p;
   });
 }
 
-/** Map PG row to SQLite-compatible format (booleans→0/1, dates→ISO strings, jsonb→strings) */
+/** Map PostgreSQL row types to JavaScript values */
 function mapRow(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(row)) {
     if (v === null || v === undefined) {
       out[k] = null;
     } else if (typeof v === 'boolean') {
-      out[k] = v ? 1 : 0;
+      out[k] = v ? 1 : 0; // Expose as 1/0 for existing frontend boolean comparisons, and truthy in JS
     } else if (v instanceof Date) {
       out[k] = v.toISOString();
     } else if (typeof v === 'object') {
-      // JSONB → JSON string (matches SQLite TEXT behavior)
+      // JSONB column → JSON string (matches SQLite text representation expected by certain parsers)
       out[k] = JSON.stringify(v);
     } else if (typeof v === 'bigint') {
       out[k] = Number(v);
@@ -180,25 +220,16 @@ function mapRow(row: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-// ─── Prepared Statement (SQLite-compatible) ───────────────────────────────────
+// ─── Prepared Statement (SQLite API Compatible for Supabase PostgreSQL) ───────
 class PgStatement {
   private pgSql: string;
-  private isInsertOrIgnore: boolean;
-  private isInsertOrReplace: boolean;
 
   constructor(private originalSql: string) {
-    this.isInsertOrIgnore = /INSERT OR IGNORE/i.test(originalSql);
-    this.isInsertOrReplace = /INSERT OR REPLACE/i.test(originalSql);
-
     let s = originalSql;
     s = fixDateFunctions(s);
     s = fixConflict(s);
-    s = toPostgres(s);
-
-    if (this.isInsertOrIgnore && !s.includes('ON CONFLICT')) {
-      s += ' ON CONFLICT DO NOTHING';
-    }
-
+    s = fixBooleanExpressions(s);
+    s = toPostgresParams(s);
     this.pgSql = s;
   }
 
@@ -211,7 +242,7 @@ class PgStatement {
   all(...args: unknown[]): any[] {
     const params = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
     const { rows } = execSync(this.pgSql, normalizeParams(params));
-    return rows.map(r => mapRow(r as any));
+    return rows.map((r) => mapRow(r as any));
   }
 
   run(...args: unknown[]): { changes: number; lastInsertRowid: number } {
@@ -229,31 +260,36 @@ function pgTransaction(fn: () => void): () => void {
       fn();
       execSync('COMMIT');
     } catch (e) {
-      try { execSync('ROLLBACK'); } catch (_) {}
+      try {
+        execSync('ROLLBACK');
+      } catch (_) {}
       throw e;
     }
   };
 }
 
-// ─── Database object (drop-in for better-sqlite3 `db`) ───────────────────────
-class PgDatabase {
-  prepare(sql: string) {
+// ─── Supabase Database Object ────────────────────────────────────────────────
+class SupabaseDatabase {
+  prepare(sql: string): PgStatement {
     return new PgStatement(sql);
   }
 
   exec(sql: string): void {
-    // Multi-statement exec — split on semicolons
-    const stmts = sql.split(';').map(s => s.trim()).filter(Boolean);
+    const stmts = sql
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean);
     for (const s of stmts) {
-      try { execSync(s); } catch (e: any) {
-        // Ignore "already exists" errors during schema init
+      try {
+        execSync(s);
+      } catch (e: any) {
         if (!e.message?.includes('already exists')) throw e;
       }
     }
   }
 
   pragma(_pragma: string): void {
-    // PostgreSQL handles WAL/foreign keys automatically — no-op
+    // No-op in PostgreSQL (WAL mode and foreign keys are natively managed by Supabase)
   }
 
   transaction(fn: () => void): () => void {
@@ -261,21 +297,16 @@ class PgDatabase {
   }
 }
 
-  dbInstance = new PgDatabase();
-  initDbFn = () => {
-    try {
-      const test = dbInstance.prepare('SELECT 1 AS ok').get();
-      console.log('✅ PostgreSQL connected — Supabase KATL-Operations (ap-northeast-2)');
-    } catch (e: any) {
-      console.error('❌ PostgreSQL connection failed:', e.message);
-      process.exit(1);
-    }
-  };
-}
-
-export const db = dbInstance;
+export const db = new SupabaseDatabase();
 
 export function initDatabase(): void {
-  initDbFn();
+  try {
+    const test = db.prepare('SELECT 1 AS ok').get();
+    console.log('✅ Supabase PostgreSQL Connected: KATL-Operations (ap-northeast-2)');
+  } catch (e: any) {
+    console.error('❌ Supabase connection test failed:', e.message);
+    if (DATABASE_URL.includes('[YOUR-DB-PASSWORD]')) {
+      console.error('👉 Please update DATABASE_URL in .env with your Supabase database password.');
+    }
+  }
 }
-

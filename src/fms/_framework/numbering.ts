@@ -27,9 +27,6 @@ export function formatFmsDisplayNumber(code: string, serial: number, date: Date 
   if (code === 'PUR') {
     return `PO-${1000 + serial}`;
   }
-  if (code === 'O2D') {
-    return `O2D-${1000 + serial}`;
-  }
   const fy = getIndianFinancialYearCode(date);
   const serialPadded = String(serial).padStart(4, '0');
   return `${code}-${fy}-${serialPadded}`;

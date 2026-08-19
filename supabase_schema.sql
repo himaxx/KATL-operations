@@ -159,6 +159,34 @@ CREATE TABLE IF NOT EXISTS public.fms_step_instances (
     completed_by TEXT
 );
 
+-- Customers (Structured CRM customer master)
+CREATE TABLE IF NOT EXISTS public.customers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    mobile TEXT,
+    category TEXT CHECK(category IN ('A', 'B', 'C')) DEFAULT 'A',
+    whatsapp_opt_out BOOLEAN DEFAULT FALSE,
+    agent_name TEXT,
+    crm_executive TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- O2C CRM Actions (Side-triggered dispatch milestone tasks)
+CREATE TABLE IF NOT EXISTS public.o2c_crm_actions (
+    id TEXT PRIMARY KEY,
+    flow_id TEXT NOT NULL REFERENCES public.fms_flow_instances(id) ON DELETE CASCADE,
+    action_type TEXT NOT NULL CHECK(action_type IN ('DISPATCH_25', 'DISPATCH_50', 'DISPATCH_70')),
+    assignee_user_id TEXT NOT NULL REFERENCES public.users(id),
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'DONE', 'SKIPPED')),
+    lr_number TEXT,
+    customer_sent BOOLEAN DEFAULT FALSE,
+    agent_sent BOOLEAN DEFAULT FALSE,
+    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    work_item_id TEXT REFERENCES public.work_items(id) ON DELETE SET NULL
+);
+
 -- FMS Deleted Repository (Soft-deleted flow archive)
 CREATE TABLE IF NOT EXISTS public.fms_deleted_repository (
     id TEXT PRIMARY KEY,

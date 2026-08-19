@@ -102,7 +102,7 @@ export class WorkItemService {
     const insertScoreEvent = db.prepare(`
       INSERT INTO score_events (
         id, user_id, work_item_id, week_start_date, weight, is_done, is_on_time, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 0, 0, ?)
+      ) VALUES (?, ?, ?, ?, ?, FALSE, FALSE, ?)
     `);
 
     db.transaction(() => {
@@ -115,7 +115,7 @@ export class WorkItemService {
         dto.assignee_user_id,
         dto.title_en,
         dto.title_hi,
-        isImportantNum,
+        Boolean(dto.is_important),
         availableFromStr,
         plannedAtStr,
         createdAt,
@@ -177,7 +177,7 @@ export class WorkItemService {
 
     const queueWaitHours = workingHoursBetween(availableFrom, completedAt);
     const delayHours = workingHoursBetween(plannedAt, completedAt);
-    const isOnTime = completedAt.getTime() <= plannedAt.getTime() ? 1 : 0;
+    const isOnTime = completedAt.getTime() <= plannedAt.getTime();
 
     const updateWorkItem = db.prepare(`
       UPDATE work_items 
@@ -191,7 +191,7 @@ export class WorkItemService {
 
     const updateScoreEvent = db.prepare(`
       UPDATE score_events
-      SET is_done = 1,
+      SET is_done = TRUE,
           is_on_time = ?,
           updated_at = ?
       WHERE work_item_id = ?
@@ -230,8 +230,8 @@ export class WorkItemService {
 
       db.prepare(`
         UPDATE score_events
-        SET is_done = 0,
-            is_on_time = 0,
+        SET is_done = FALSE,
+            is_on_time = FALSE,
             updated_at = ?
         WHERE work_item_id = ?
       `).run(now, workItemId);
@@ -262,11 +262,11 @@ export class WorkItemService {
         WHERE id = ?
       `).run(now.toISOString(), overrideBy, queueWaitHours, delayHours, workItemId);
 
-      // Invariant: Override missed item gets is_done = 1, but is_on_time = 0 permanently
+      // Invariant: Override missed item gets is_done = TRUE, but is_on_time = FALSE permanently
       db.prepare(`
         UPDATE score_events
-        SET is_done = 1,
-            is_on_time = 0,
+        SET is_done = TRUE,
+            is_on_time = FALSE,
             updated_at = ?
         WHERE work_item_id = ?
       `).run(now.toISOString(), workItemId);
